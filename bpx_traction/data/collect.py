@@ -42,8 +42,17 @@ class CollectionConfig:
     rounds: int = 4
     #: 挂点是否逐 env 随机（见 `tether.randomize_offsets` 的取舍说明）。
     randomize_attach: bool = True
-    #: 力的档位。上限按扛力扫描实测的 30 N，另外带一档 OOD。
-    magnitudes_n: tuple[float, ...] = (0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 45.0)
+    #: 力的档位。上限按扛力扫描实测的 30 N，另外带一档 OOD（45 N）让置信度头学会说
+    #: "我不知道"。
+    #:
+    #: **低档位加得密**（2/3/5/8）是因为死区就落在这个带里。第一次采集用
+    #: `(0, 5, 10, …)` 的均匀档位，结果 2–5 N 只占 2% —— 0 和 5 之间没有档，
+    #: 那个区间只在 ramp 的瞬间扫过。而死区要不要设在 3 N 还是 8 N、估计器能不能
+    #: 把"轻轻一碰"和"没有力"分开，全靠这一段的数据。
+    #: Go2 的验收报告里"2–5 N 方向尾部"也正是被点名的弱区。
+    magnitudes_n: tuple[float, ...] = (
+        0.0, 2.0, 3.0, 5.0, 8.0, 10.0, 15.0, 20.0, 25.0, 30.0, 45.0
+    )
     #: 四类瞬态的配比，按出现概率。稳态样本便宜、瞬态样本贵，但瞬态才是难点。
     profile_weights: dict[str, float] = field(
         default_factory=lambda: {"hold": 0.3, "ramp": 0.2, "release": 0.2,
