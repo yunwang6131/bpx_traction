@@ -37,6 +37,18 @@ SAMPLE_PERIOD_S = 0.02
 #: 历史窗口长度。契约里是 `history_steps: 25`。
 HISTORY_LENGTH = 25
 
+#: 历史窗口的时间方向：**最旧在前，最新在末尾**（`history[-1]` 是当前帧）。
+#:
+#: 这条必须写死，因为三处约定必须对齐，而参考实现用的是**反过来的**：
+#:
+#:   * 板子：`history[:-1] = history[1:]; history[-1] = frame` —— 最新在末尾；
+#:   * `model.py`：卷积左 padding（因果），前向取 `x[:, :, -1]` —— 最新必须在末尾；
+#:   * Go2 参考实现：`torch.roll(history, 1, 1); history[:, 0] = sensor` —— 最新在**开头**。
+#:
+#: 时间方向接反了不会报错，只会让估计器把"最早的 9 帧"当成当前状态去推外力 ——
+#: 训练损失照样下降（它学到的是一个延迟 500 ms 的映射），上真机才发现响应完全不对。
+HISTORY_NEWEST_LAST = True
+
 assert abs(SAMPLE_PERIOD_S - 1.0 / rma_spec.POLICY_HZ) < 1e-12, (
     "估计器周期和策略频率对不上：估计器要和策略同频，一个策略步推一帧历史"
 )

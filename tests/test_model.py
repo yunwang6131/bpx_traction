@@ -91,6 +91,27 @@ def test_last_frame_always_matters(net):
     assert not torch.allclose(v0, v1)
 
 
+def test_time_direction_matches_the_contract(net):
+    """`spec.HISTORY_NEWEST_LAST` 说最新帧在末尾，模型必须真的这么用。
+
+    模型取 `x[:, :, -1]` 配因果左 padding，所以末尾那一帧（以及它之前的 8 帧）决定输出，
+    开头那些帧越界就没影响。把这件事变成断言 —— 时间方向接反了不会报错，只会让估计器
+    学到一个延迟半秒的映射，训练损失照样好看。
+    """
+    assert spec.HISTORY_NEWEST_LAST, "这个测试假定最新帧在末尾"
+    torch.manual_seed(4)
+    x = torch.randn(2, T, D)
+    base, _ = net(x)
+
+    newest = x.clone()
+    newest[:, -1] += 3.0                  # 动最新帧 → 必须变
+    oldest = x.clone()
+    oldest[:, 0] += 3.0                   # 动最旧帧（感受野外）→ 必须不变
+
+    assert not torch.equal(net(newest)[0], base), "最新帧没影响输出 —— 时间方向反了？"
+    assert torch.equal(net(oldest)[0], base), "最旧帧影响了输出 —— 时间方向反了？"
+
+
 # --------------------------------------------------------------------------
 # 输出量程 —— 激活必须按契约钳住
 # --------------------------------------------------------------------------
