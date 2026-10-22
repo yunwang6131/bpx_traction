@@ -1,0 +1,24 @@
+schema_version: gate41-frame-v1
+quaternion:
+  symbol: q_wb
+  order: wxyz
+  meaning: body_to_world
+  normalization: required
+frames:
+  world:
+    id: W0
+    definition: startup_heading_gravity_aligned
+    reset_events: [tether_mode_enable, fall_recovery, estimator_restart]
+  body:
+    id: B
+    definition: current_base_link
+quantities:
+  tether_force_w: {unit: N, frame: W0, canonical: true}
+  tether_force_b: {unit: N, frame: B, canonical: false, consumer: frozen_actor_adapter}
+transforms:
+  body_to_world: F_w = R_wb * F_b
+  world_to_body: F_b = transpose(R_wb) * F_w
+invariants:
+  max_roundtrip_absolute_error: 1.0e-5
+  max_relative_norm_error: 1.0e-5
+  fixed_world_yaw_drift_deg: 1.0

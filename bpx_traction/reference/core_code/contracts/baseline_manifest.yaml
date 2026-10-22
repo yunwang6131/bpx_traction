@@ -1,0 +1,16 @@
+schema_version: gate41-baseline-v1
+task_name: Unitree-Go2-SelfPull-Gate41-Slowdown
+checkpoint_iteration: 17488
+frozen_directory: artifacts/gate41_model17488_frozen_20260718
+assets:
+  model_17488.pt: 0a56c26901c439527d2f9e283b83967befaa567e4d0709ec2fd0bf6c7d0598d8
+  policy.onnx: da33b549c6257beb0323cd09cdfb9c48105b778d9865c93b9878a554346df2a9
+  force_estimator.onnx: 035bcd709e0d897412015717440b91151411596f291b4129d4a3b820ef5af5fd
+  deploy.yaml: bffc1916987fa4046faf15cf3f1118b2631366e7533cb7f1d0a1c56d27d829bb
+  onnx_consistency.json: 0cba65be626d7883fe1f8d2e2c812aecf797bd15479491af8a06e83295c69bc4
+frozen_interface:
+  observation_dimension: 73
+  action_dimension: 12
+  force_scale_n: 80
+  policy_force_input_frame: body
+write_policy: read_only

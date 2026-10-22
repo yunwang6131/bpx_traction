@@ -1,0 +1,21 @@
+{
+  "virtual_mass_kg": 3.2,
+  "virtual_damping_ns_per_m": 25.185185185185187,
+  "deadzone_on_n": 8.0,
+  "deadzone_off_n": 6.0,
+  "min_speed_mps": 0.15,
+  "stand_threshold_mps": 0.1,
+  "max_accel_mps2": 2.0,
+  "conf_gate": 0.55,
+  "conf_gate_steps": 10,
+  "vx_range": [
+    -1.0,
+    1.5
+  ],
+  "vy_range": [
+    -0.5,
+    0.5
+  ],
+  "source_task": "Isaac-Velocity-Flat-BpxPro-v0",
+  "calibrated": false
+}

@@ -1,0 +1,35 @@
+schema_version: gate41-estimator-io-v2
+architecture: fused_tcn
+components:
+  primary: missing_state_world_v15_primary
+  state_specialist: state_specialist_v13
+release_model: missing_state_world_v15_release
+fusion:
+  base_velocity_w: state_specialist
+  base_height: state_specialist
+  contact_probability: primary
+  foot_load_latent: primary
+  tether_force_w: primary
+sample_period_s: 0.02
+history_steps: 25
+input_dimension: 64
+input_groups:
+  - {name: imu_acc_b, dimension: 3, source: lowstate, privileged: false}
+  - {name: imu_gyro_b, dimension: 3, source: lowstate, privileged: false}
+  - {name: projected_gravity_b, dimension: 3, source: imu_attitude, privileged: false}
+  - {name: q_wb, dimension: 4, source: imu_attitude, privileged: false}
+  - {name: joint_position, dimension: 12, source: lowstate, privileged: false}
+  - {name: joint_velocity, dimension: 12, source: lowstate, privileged: false}
+  - {name: motor_torque_estimate, dimension: 12, source: lowstate, privileged: false}
+  - {name: previous_action, dimension: 12, source: controller, privileged: false}
+  - {name: velocity_command_b, dimension: 3, source: controller, privileged: false}
+output_dimension: 15
+output_groups:
+  - {name: base_velocity_w, dimension: 3, unit: m/s, frame: W0}
+  - {name: base_height, dimension: 1, unit: m, frame: gravity}
+  - {name: contact_probability, dimension: 4, unit: probability, frame: foot}
+  - {name: foot_load_latent, dimension: 4, unit: normalized_load, frame: foot}
+  - {name: tether_force_w, dimension: 3, unit: N, frame: W0}
+confidence_groups: [velocity, height, contact, force]
+leakage_policy:
+  forbidden_inputs: [root_state, contact_sensor_truth, external_force_generator, tether_force_w, base_velocity_w, base_height_truth]

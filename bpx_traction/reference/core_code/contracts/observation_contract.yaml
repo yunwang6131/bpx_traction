@@ -1,0 +1,21 @@
+schema_version: gate41-observation-v2
+total_dimension: 73
+policy_model: model_17488.pt
+terms:
+  - {index: '0:3', name: base_lin_acc, dimension: 3, unit: m/s2, frame: body, scale: 1.0, clip: null, latency_ms: 20, source: imu, fallback: safe_stop}
+  - {index: '3:6', name: base_lin_vel, dimension: 3, unit: m/s, frame: body, scale: 1.0, clip: null, latency_ms: 40, source: estimator, fallback: decay_to_zero}
+  - {index: '6:9', name: base_ang_vel, dimension: 3, unit: rad/s, frame: body, scale: 1.0, clip: null, latency_ms: 20, source: imu, fallback: safe_stop}
+  - {index: '9:12', name: projected_gravity, dimension: 3, unit: '1', frame: body, scale: 1.0, clip: [-1, 1], latency_ms: 20, source: imu_attitude, fallback: safe_stop}
+  - {index: '12:13', name: base_height, dimension: 1, unit: m, frame: gravity, scale: 1.0, clip: [0.18, 0.55], latency_ms: 40, source: estimator_kinematics, fallback: stand}
+  - {index: '13:16', name: velocity_commands, dimension: 3, unit: [m/s, m/s, rad/s], frame: body, scale: 1.0, clip: null, latency_ms: 0, source: controller, fallback: zero}
+  - {index: '16:18', name: gait_phase, dimension: 2, unit: '1', frame: policy, scale: 1.0, clip: [-1, 1], latency_ms: 0, source: controller_clock, fallback: zero}
+  - {index: '18:30', name: joint_pos_rel, dimension: 12, unit: rad, frame: joint, scale: 1.0, clip: null, latency_ms: 20, source: lowstate, fallback: safe_stop}
+  - {index: '30:42', name: joint_vel_rel, dimension: 12, unit: rad/s, frame: joint, scale: 1.0, clip: null, latency_ms: 20, source: lowstate, fallback: zero_and_degrade}
+  - {index: '42:54', name: last_action, dimension: 12, unit: '1', frame: policy, scale: 1.0, clip: [-1, 1], latency_ms: 0, source: controller, fallback: zero}
+  - {index: '54:58', name: foot_contact, dimension: 4, unit: probability, frame: foot, scale: 1.0, clip: [0, 1], latency_ms: 40, source: estimator, fallback: confidence_degrade}
+  - {index: '58:70', name: foot_contact_forces, dimension: 12, unit: log1p_N, frame: body, scale: 1.0, clip: null, latency_ms: 40, source: foot_load_latent_adapter, fallback: zero_and_degrade}
+  - {index: '70:73', name: estimated_force, dimension: 3, unit: N_over_80, frame: body, scale: 0.0125, clip: [-1, 1], latency_ms: 40, source: world_estimator_v15_release_via_world_to_body, fallback: decay_to_zero}
+validation:
+  require_contiguous_indices: true
+  require_exact_order: true
+  privileged_sources_forbidden_in_actor: [root_state, contact_sensor_truth, external_force_generator]
