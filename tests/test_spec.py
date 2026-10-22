@@ -158,11 +158,25 @@ def test_policy_frame_size_is_whatever_bpx_rma_says():
 # --------------------------------------------------------------------------
 # 待确认的物理参数
 # --------------------------------------------------------------------------
+def test_tether_offset_range_is_well_formed():
+    """挂点是个区域不是一个点（真机上人想从哪儿拉就从哪儿拉），范围本身得合法。"""
+    ranges = spec.TETHER_OFFSET_RANGE_B
+    assert len(ranges) == 3, "三个轴"
+    for axis, (lo, hi) in zip("xyz", ranges):
+        assert lo <= hi, f"{axis} 轴范围顺序反了：{(lo, hi)}"
+
+
+def test_nominal_offset_is_inside_the_range():
+    """标称挂点（确定性评估用）必须落在随机范围内，否则评估和训练分布脱节。"""
+    for value, (lo, hi) in zip(spec.TETHER_OFFSET_B, spec.TETHER_OFFSET_RANGE_B):
+        assert lo <= value <= hi
+
+
 def test_tether_attach_point_is_flagged_unconfirmed():
-    """挂点现在是占位值。仿真施力点和真机挂点必须一致，否则标签有歧义。
-    真机量过之后把 TETHER_OFFSET_CONFIRMED 改 True，这个测试会提醒更新。"""
+    """挂点范围现在是按整机尺寸估的占位值。真机量过之后把 TETHER_OFFSET_CONFIRMED
+    改 True，这个测试会提醒更新。"""
     if not spec.TETHER_OFFSET_CONFIRMED:
-        pytest.xfail("挂点未经真机确认 —— 采数据前必须定（见 docs/traction_plan.md）")
+        pytest.xfail("挂点范围未经真机确认 —— 采数据前必须量（见 docs/traction_plan.md）")
     assert spec.TETHER_BODY in (rma_spec.TORSO_BODY,)
 
 

@@ -11,8 +11,8 @@
 * ``is_global=False`` → positions 是**相对 link frame 的偏移**
 * ``is_global=True``  → positions 是力作用点的**世界坐标**
 
-挂点是个固定的机身系偏移，所以走 ``is_global=False`` 这条：自己把世界系力旋进机身系，
-positions 直接给常量偏移。好处是顺带就拿到了**标签**——
+挂点是个机身系偏移（而且逐 env 可以不同），所以走 ``is_global=False`` 这条：自己把世界系力
+旋进机身系，positions 直接给偏移。好处是顺带就拿到了**标签**——
 
     label_contract: 合外力旋到当前机身坐标系
 
@@ -20,14 +20,18 @@ positions 直接给常量偏移。好处是顺带就拿到了**标签**——
 是同一个约定（见 `reference/PROVENANCE.md` §2.3）。施力和打标签用同一个张量，
 不可能对不上。
 
-## 挂点为什么要紧
+## 挂点是个区域，不是一个点
 
-挂点在质心上方 h 处时，水平力 F 会额外产生 F·h 的俯仰力矩，而**姿态信号比力本身好读**
-（IMU 直接给四元数和角速度）。所以挂高一点反而更好估。
+真机上人想从哪儿拉就从哪儿拉。所以估计器必须对挂点**不变**，做法是采数据时按 env 在
+`spec.TETHER_OFFSET_RANGE_B` 里随机，而不是把它钉死在一个点上。
 
-更要命的是：**仿真施力点必须和真机挂点一致**。不一致的话，"同样的力、不同挂点"会产生
-不同的本体响应，估计器学到的是错的映射 —— 这是会污染整个数据集、而且在仿真里永远测
-不出来的那种错。`spec.TETHER_OFFSET_CONFIRMED` 就是这个闸门。
+代价要明说：同一个力作用在不同挂点上，力臂不同 → 俯仰/横滚力矩不同 → 本体响应不同。
+随机化之后"本体感知 → 外力"是个**一对多**的映射，估计器只能学到条件均值，这部分误差
+消不掉，范围越大下限越高。所以它是个**该测的消融项**：固定挂点训一版、随机挂点训一版，
+力精度的差就是"挂哪儿都行"这个便利的标价。
+
+确定性评估（扛力扫描、回放、对比）要用固定的标称挂点 `spec.TETHER_OFFSET_B`，
+否则不同策略之间比的不是同一件事。
 """
 
 from __future__ import annotations
@@ -74,22 +78,19 @@ class TetherApplier:
         self.body_id = int(body_ids[0])
         self._body_ids = torch.tensor([self.body_id], dtype=torch.long, device=self.device)
 
-        offset = tuple(spec.TETHER_OFFSET_B if offset_b is None else offset_b)
-        self.offset_b = offset
-        self._has_offset = any(abs(v) > 1e-9 for v in offset)
-        self._positions = (
-            torch.tensor(offset, dtype=torch.float32, device=self.device)
-            .reshape(1, 1, 3)
-            .repeat(robot.num_instances, 1, 1)
-            if self._has_offset
-            else None
-        )
+        self.nominal_offset_b = tuple(spec.TETHER_OFFSET_B if offset_b is None else offset_b)
+        #: 每个 env 的挂点偏移 (N, 3)。默认全是标称值，`randomize_offsets()` 之后才分散。
+        self.offsets_b = torch.tensor(
+            self.nominal_offset_b, dtype=torch.float32, device=self.device
+        ).reshape(1, 3).repeat(robot.num_instances, 1)
+        self._randomized = False
+        self._sync_positions()
 
         if warn_unconfirmed and not spec.TETHER_OFFSET_CONFIRMED:
             print(
-                f"[traction] ⚠️ 挂点 {self.body_name}+{offset} 未经真机确认。"
-                f"仿真施力点和真机挂点不一致会让标签有歧义 —— "
-                f"量过之后改 spec.TETHER_OFFSET_B 和 TETHER_OFFSET_CONFIRMED。"
+                f"[traction] ⚠️ 挂点未经真机确认。标称 {self.body_name}+"
+                f"{self.nominal_offset_b}，随机范围 {spec.TETHER_OFFSET_RANGE_B}。"
+                f"按真机实际能挂的位置量一遍再改 spec.TETHER_OFFSET_CONFIRMED。"
             )
 
         self._zero_torque = torch.zeros(robot.num_instances, 1, 3, device=self.device)
@@ -97,6 +98,52 @@ class TetherApplier:
         self.last_force_b = torch.zeros(robot.num_instances, 3, device=self.device)
         #: 上一次施加的世界系力 (N, 3)，仅供诊断，**不要当标签**。
         self.last_force_w = torch.zeros(robot.num_instances, 3, device=self.device)
+
+    # ----------------------------------------------------------------------
+    def _sync_positions(self) -> None:
+        """挂点全为零时省掉 positions（少一次 cross product）。"""
+        self._positions = (
+            self.offsets_b.reshape(-1, 1, 3)
+            if bool((self.offsets_b.abs() > 1e-9).any())
+            else None
+        )
+
+    def randomize_offsets(
+        self,
+        offset_range: tuple[tuple[float, float], ...] | None = None,
+        env_ids: torch.Tensor | None = None,
+        generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
+        """按 env 在范围里均匀重采挂点。**采训练数据时每次 reset 都要调。**
+
+        真机上挂点不固定，估计器必须对它不变 —— 而不变是训出来的，不是假设出来的。
+        代价见模块 docstring：这会把"本体感知 → 外力"变成一对多映射，留下一个消不掉的
+        误差下限。跑固定挂点和随机挂点各一版、比力精度，才知道这个下限有多高。
+        """
+        ranges = offset_range or spec.TETHER_OFFSET_RANGE_B
+        if len(ranges) != 3:
+            raise ValueError(f"挂点范围要给 3 个轴，拿到 {len(ranges)}")
+
+        if env_ids is None:
+            env_ids = torch.arange(self.robot.num_instances, device=self.device)
+        n = len(env_ids)
+        sample = torch.rand(n, 3, device=self.device, generator=generator)
+        lo = torch.tensor([r[0] for r in ranges], device=self.device)
+        hi = torch.tensor([r[1] for r in ranges], device=self.device)
+        self.offsets_b[env_ids] = lo + sample * (hi - lo)
+
+        self._randomized = True
+        self._sync_positions()
+        return self.offsets_b
+
+    def reset_offsets(self) -> None:
+        """回到标称挂点。确定性评估（扛力扫描、策略对比）必须用这个，
+        否则不同策略之间比的不是同一件事。"""
+        self.offsets_b[:] = torch.tensor(
+            self.nominal_offset_b, dtype=torch.float32, device=self.device
+        )
+        self._randomized = False
+        self._sync_positions()
 
     # ----------------------------------------------------------------------
     def apply_world(self, forces_w: torch.Tensor) -> torch.Tensor:
@@ -160,15 +207,22 @@ class TetherApplier:
         from isaaclab.utils.math import quat_apply
 
         link_pos = self.robot.data.body_pos_w[:, self.body_id]
-        if not self._has_offset:
+        if self._positions is None:
             return link_pos
-        offset = torch.tensor(self.offset_b, dtype=torch.float32, device=self.device)
         quat = self.robot.data.body_quat_w[:, self.body_id]
-        return link_pos + quat_apply(quat, offset.expand_as(link_pos))
+        return link_pos + quat_apply(quat, self.offsets_b)
 
     def describe(self) -> str:
         confirmed = "已确认" if spec.TETHER_OFFSET_CONFIRMED else "⚠️ 未经真机确认"
+        if self._randomized:
+            lo = self.offsets_b.min(dim=0).values.tolist()
+            hi = self.offsets_b.max(dim=0).values.tolist()
+            where = (f"逐 env 随机，实际跨度 "
+                     f"x[{lo[0]:+.3f},{hi[0]:+.3f}] y[{lo[1]:+.3f},{hi[1]:+.3f}] "
+                     f"z[{lo[2]:+.3f},{hi[2]:+.3f}] m")
+        else:
+            where = f"固定标称 {self.nominal_offset_b} m"
         return (
-            f"挂点 {self.body_name}(body_id={self.body_id}) + {self.offset_b} m  [{confirmed}]\n"
+            f"挂点 {self.body_name}(body_id={self.body_id})  {where}  [{confirmed}]\n"
             f"标签 = 合外力旋到当前机身系（和施加的是同一个张量）"
         )

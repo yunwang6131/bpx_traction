@@ -69,6 +69,78 @@ def test_hysteresis_prevents_chatter():
 
 
 # --------------------------------------------------------------------------
+# 持续时间去抖：分开"被推了一下"和"被牵着走"
+# --------------------------------------------------------------------------
+def test_brief_push_is_rejected():
+    """推一把大概持续 100–200 ms。比去抖窗口短的力脉冲必须完全不产生指令。
+
+    瞬时力上推搡和牵引长得一模一样，只有时长能分开它们。没有这道去抖，
+    每一次碰撞、每一次估计器误报都会把机器人拽着走。
+    """
+    p = AdmittanceParams(engage_hold_s=0.25)
+    m = AdmittanceMapping(p)
+    push_steps = int(0.15 / DT)                      # 150 ms 的大力脉冲
+
+    cmd = run(m, (40.0, 0.0), steps=push_steps)
+    assert np.allclose(cmd, 0.0), "短脉冲不该让它动"
+    assert not m.state.engaged
+
+    cmd = run(m, (0.0, 0.0), steps=100)              # 力撤掉
+    assert np.allclose(cmd, 0.0)
+
+
+def test_sustained_pull_engages_after_the_hold_window():
+    p = AdmittanceParams(engage_hold_s=0.25, max_accel_mps2=1e6)
+    m = AdmittanceMapping(p)
+    hold_steps = int(round(p.engage_hold_s / DT))
+
+    cmd = run(m, (25.0, 0.0), steps=hold_steps - 1)
+    assert np.allclose(cmd, 0.0), f"还差一步到 {hold_steps} 就起步了"
+
+    cmd = run(m, (25.0, 0.0), steps=200)
+    assert m.state.engaged
+    assert cmd[-1, 0] > p.min_speed_mps
+
+
+def test_intermittent_force_never_engages():
+    """力断断续续地超过死区（比如步态引起的周期性误报），计数器清零，不该起步。"""
+    p = AdmittanceParams(engage_hold_s=0.25)
+    m = AdmittanceMapping(p)
+    hold_steps = int(round(p.engage_hold_s / DT))
+    for k in range(600):
+        f = 30.0 if (k % hold_steps) < hold_steps - 2 else 0.0   # 每次差两步就断
+        m.step(np.array([f, 0.0, 0.0]), 1.0)
+        assert not m.state.engaged, f"第 {k} 步被断续的力骗起步了"
+
+
+def test_zero_hold_engages_immediately():
+    p = AdmittanceParams(engage_hold_s=0.0)
+    m = AdmittanceMapping(p)
+    m.step(np.array([25.0, 0.0, 0.0]), 1.0)
+    assert m.state.engaged
+
+
+def test_release_stops_immediately_by_default():
+    """默认 release_hold_s=0：力一撤就脱离。停比走更安全，不该有延迟。"""
+    p = AdmittanceParams(max_accel_mps2=1e6)
+    m = AdmittanceMapping(p)
+    run(m, (25.0, 0.0), steps=200)
+    assert m.state.engaged
+    m.step(np.array([0.0, 0.0, 0.0]), 1.0)
+    assert not m.state.engaged
+
+
+def test_engaged_force_dip_within_hysteresis_keeps_moving():
+    """起步之后力掉进迟滞带（off 和 on 之间），不该重新走一遍去抖窗口。"""
+    p = AdmittanceParams(engage_hold_s=0.25, max_accel_mps2=1e6)
+    m = AdmittanceMapping(p)
+    run(m, (25.0, 0.0), steps=200)
+    between = 0.5 * (p.deadzone_on_n + p.deadzone_off_n)
+    run(m, (between, 0.0), steps=100)
+    assert m.state.engaged
+
+
+# --------------------------------------------------------------------------
 # 导纳本体
 # --------------------------------------------------------------------------
 def test_steady_state_matches_admittance():
@@ -88,9 +160,9 @@ def test_step_response_matches_zoh_solution():
 
     比"在 τ 处到 63%"强：那只在连续时间下成立，而 τ=127 ms 不是 20 ms 的整数倍，
     用它做断言会把离散化的舍入误差当成 bug。这里直接验离散解本身。
-    用大 max_accel 跑，避免速率限幅污染。
+    用大 max_accel 跑，避免速率限幅污染；关掉去抖，否则起步会被推迟 engage_hold_s。
     """
-    p = AdmittanceParams(max_accel_mps2=1e6)
+    p = AdmittanceParams(max_accel_mps2=1e6, engage_hold_s=0.0)
     m = AdmittanceMapping(p)
     force = 20.0
     cmd = run(m, (force, 0.0), steps=40)
@@ -191,7 +263,8 @@ def test_confidence_gate_needs_sustained_low():
         m.step(np.array([25.0, 0.0, 0.0]), p.conf_gate - 0.01)
     assert m.state.velocity[0] > 0.05, "还没到闸门步数就停了"
 
-    for _ in range(50):                                 # 继续低 → 闸死
+    # 衰减步数按 τ 算，不写死 —— M / B 一调，写死的步数就不够了
+    for _ in range(int(12 * p.tau_s() / DT)):           # 继续低 → 闸死
         m.step(np.array([25.0, 0.0, 0.0]), p.conf_gate - 0.01)
     assert m.state.velocity[0] == pytest.approx(0.0, abs=1e-3)
 

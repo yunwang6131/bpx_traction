@@ -28,8 +28,8 @@
 这两个数能用手感直接判断（"太沉了"减 M，"太黏了"减 B，"一拉就窜"加 B），
 而等价的"增益 K = 1/B、低通 τ"是两个拍脑袋的数。标定从凑参数变成调手感。
 
-默认 M=3.2 kg / B=21 N·s/m：虚拟质量远小于整机 15.1 kg，这正是牵引想要的 ——
-**拉起来比它本身轻**。
+默认 M=3.2 kg / B=17.8 N·s/m：拉着它以 1 m/s 走手上约 18 N，虚拟质量只有整机 15.1 kg 的
+两成 —— 这正是牵引想要的，**拉起来比它本身轻**。B 是从实测的 30 N 饱和点反解的，见下。
 
 ## 为什么有 min_speed
 
@@ -66,18 +66,35 @@ class AdmittanceParams:
     """
 
     # --- 导纳本体 ---
-    virtual_mass_kg: float = 3.2          # M。τ = M/B ≈ 0.13 s
-    #: B。**不要手填** —— 由 `damping_for_saturation(40, 1.5, 6.0, 0.15)` 反解得到：
-    #: 设计意图是"力到 40 N（设计范围上限）时指令正好到 vx 上限 1.5"。
+    virtual_mass_kg: float = 3.2          # M。τ = M/B ≈ 0.18 s
+    #: B。**不要手填** —— 由 `damping_for_saturation(30, 1.5, 6.0, 0.15)` 反解得到：
+    #: "力到 30 N 时指令正好到 vx 上限 1.5"。30 N 是扛力扫描实测的策略上限
+    #: （见 `spec.FORCE_DESIGN_RANGE_N`），再往上机器人会被拖走，发再大的指令也没用。
     #: 死区实测出来之后，用同一个函数重算，不要回头凑数。
-    virtual_damping_ns_per_m: float = 25.185185185185187
+    virtual_damping_ns_per_m: float = 17.77777777777778
 
     # --- 死区（Schmitt 迟滞，避免边界抖动）---
     deadzone_on_n: float = 8.0            # 待实测：超过它才开始走
     deadzone_off_n: float = 6.0           # 待实测：掉到它以下才停
     # 占位值来自 Go2 的跟随阈值（‖F_xy‖ ≥ 8 N 必须跟随、< 8 N 必须站住）。
     # BPX 自己的死区取决于**走路时机身受力的周期波动有多大** —— 步态本身会产生周期性的
-    # 机身力，估计器会把那个当外力。P2 采完第一批数据一看就知道。在那之前任何数字都是编的。
+    # 机身力，估计器会把那个当外力。采完第一批数据一看就知道，在那之前任何数字都是编的。
+
+    # --- 持续时间：区分"被推了一下"和"被牵着走" ---
+    #: 力必须**连续**超过 `deadzone_on_n` 这么久才起步。
+    #:
+    #: 推搡是瞬态的（人推一把，接触大概 100–200 ms），牵引是持续的（秒级）。
+    #: 两者在**瞬时力**上长得一模一样，区别只在时间尺度上 —— 所以靠时长判，这是唯一
+    #: 能分开它们的信号。没有这道去抖，机器人会被每一次碰撞、每一次踩空的反作用、
+    #: 每一次估计器误报拽着走。
+    #:
+    #: 代价是延迟。总的起步延迟大致是：
+    #:     估计器感受野 180 ms + 去抖 engage_hold_s + 导纳 τ
+    #: 默认 0.2 s 下合计约 0.5 s，正好压在响应预算上。调大它更不容易误触发，
+    #: 但人拉绳子之后要等更久才动。
+    engage_hold_s: float = 0.20
+    #: 反过来：力掉到 `deadzone_off_n` 以下多久才停。设成 0 = 立刻停（更安全）。
+    release_hold_s: float = 0.0
 
     # --- 跳过 gait_phase_obs 的 stand_threshold ---
     min_speed_mps: float = 0.15
@@ -186,6 +203,8 @@ class MappingState:
 
     velocity: np.ndarray = field(default_factory=lambda: np.zeros(2, dtype=np.float64))
     engaged: bool = False          # Schmitt 触发器的状态
+    above_steps: int = 0           # 连续超过 deadzone_on 的步数（去抖用）
+    below_steps: int = 0           # 连续低于 deadzone_off 的步数
     low_conf_steps: int = 0        # 连续低置信度的步数
     bias_xy: np.ndarray = field(default_factory=lambda: np.zeros(2, dtype=np.float64))
 
@@ -247,8 +266,24 @@ class AdmittanceMapping:
         s.low_conf_steps = s.low_conf_steps + 1 if conf < p.conf_gate else 0
         gated = s.low_conf_steps >= p.conf_gate_steps
 
-        # 2) Schmitt 死区：进出用不同阈值，力在边界抖动不会让指令来回开关
-        s.engaged = magnitude > (p.deadzone_off_n if s.engaged else p.deadzone_on_n)
+        # 2) Schmitt 死区 + 持续时间去抖
+        #    瞬时力分不出"被推了一下"和"被牵着走"，只有时长能分。所以起步要求力
+        #    **连续**超过 deadzone_on 够久；一旦起步，用更低的 deadzone_off 维持（迟滞）。
+        engage_steps = max(1, int(round(p.engage_hold_s / dt))) if p.engage_hold_s > 0 else 1
+        release_steps = max(1, int(round(p.release_hold_s / dt))) if p.release_hold_s > 0 else 1
+
+        if s.engaged:
+            s.above_steps = 0
+            s.below_steps = s.below_steps + 1 if magnitude <= p.deadzone_off_n else 0
+            if s.below_steps >= release_steps:
+                s.engaged = False
+                s.below_steps = 0
+        else:
+            s.below_steps = 0
+            s.above_steps = s.above_steps + 1 if magnitude > p.deadzone_on_n else 0
+            if s.above_steps >= engage_steps:
+                s.engaged = True
+                s.above_steps = 0
 
         # 3) 稳态目标速度
         if gated or not s.engaged or magnitude <= 1e-9:
@@ -290,6 +325,10 @@ class AdmittanceMapping:
             f"（拉起来应该比实际轻）",
             f"死区       进 {p.deadzone_on_n:.1f} N / 出 {p.deadzone_off_n:.1f} N"
             f"{'' if p.calibrated else '   ⚠️ 占位值，待实测'}",
+            f"去抖       力要连续超过死区 {p.engage_hold_s * 1000:.0f} ms 才起步"
+            f"（推一下 100–200 ms，拒掉；牵引是秒级，放行）",
+            f"起步延迟   感受野 180 + 去抖 {p.engage_hold_s * 1000:.0f} + 导纳 τ "
+            f"{p.tau_s() * 1000:.0f} ≈ {180 + p.engage_hold_s * 1000 + p.tau_s() * 1000:.0f} ms",
             f"起步速度   {p.min_speed_mps:.2f} m/s（跳过 stand_threshold {p.stand_threshold_mps:.2f}）",
             f"限幅       vx {p.vx_range}   vy {p.vy_range}   wz 恒 0",
             f"           来源 {p.source_task}",

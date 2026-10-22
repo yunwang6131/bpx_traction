@@ -246,7 +246,10 @@ class SweepRunner:
         force_mag = torch.linalg.norm(force_xy, dim=1)
         has_force = force_mag > 1e-6
 
-        with torch.inference_mode():
+        # 用 no_grad 而**不是** inference_mode：inference_mode 会把 IsaacLab 内部的
+        # root_link_pose_w 之类的缓冲变成 inference tensor，下一个策略 reset() 在推理块
+        # 外面写它就直接 RuntimeError。多策略依次扫必然踩到，play.py 只跑一个所以没事。
+        with torch.no_grad():
             for step in range(total):
                 # 指令每步都写 —— command manager 会按 resampling_time_range 覆盖
                 self.base.command_manager.get_command("base_velocity")[:] = self.command
