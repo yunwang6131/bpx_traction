@@ -50,16 +50,23 @@ class CausalBlock(nn.Module):
     只有 4 层，不加也不会有梯度问题。
     """
 
-    def __init__(self, channels: int, kernel_size: int = 3, dilation: int = 1):
+    def __init__(self, channels: int, kernel_size: int = 3, dilation: int = 1,
+                 residual: bool = False):
         super().__init__()
         self.pad = (kernel_size - 1) * dilation
         self.conv = nn.Conv1d(channels, channels, kernel_size, dilation=dilation)
         self.norm = ChannelLayerNorm(channels)
         self.act = nn.GELU()
+        #: 残差连接。参考实现没有（它也没有空洞），但**加了空洞之后残差就不是可选项**：
+        #: 空洞卷积有 gridding 伪影 —— 从输出位置回溯，可达偏移是 a₁·1+a₂·2+a₃·4+a₄·8
+        #: (aᵢ∈{0,1,2})，偏移 0（最新帧）只有一条通路，中间偏移有好几条。
+        #: 实测最旧帧的敏感度是最新帧的 4 倍，而当前帧才是判断"我现在受多大力"
+        #: 最直接的证据。残差给每一层一条直通路，把这个偏置补回来。
+        self.residual = residual
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = nn.functional.pad(x, (self.pad, 0))   # 只补左边 = 因果
-        return self.act(self.norm(self.conv(x)))
+        out = self.act(self.norm(self.conv(nn.functional.pad(x, (self.pad, 0)))))
+        return x + out if self.residual else out
 
 
 class ForceTCN(nn.Module):
@@ -76,12 +83,14 @@ class ForceTCN(nn.Module):
         blocks: int = 4,
         kernel_size: int = 3,
         dilations: "list[int] | tuple[int, ...] | None" = (1, 2, 4, 8),
+        residual: bool = False,
     ):
         super().__init__()
         self.input_dim = input_dim
         self.channels = channels
         self.kernel_size = kernel_size
         self.num_blocks = blocks
+        self.residual = residual
         #: 每个 TCN 块的空洞率。``None`` = 全 1（参考实现的做法，**已被实测否定**）。
         #:
         #: **为什么要用空洞**：全 1 时感受野只有 ``1 + 4×(3−1) = 9`` 帧 = 180 ms，
@@ -106,7 +115,7 @@ class ForceTCN(nn.Module):
 
         self.encoder = nn.Conv1d(input_dim, channels, kernel_size=1)
         self.tcn = nn.Sequential(
-            *[CausalBlock(channels, kernel_size, d) for d in self.dilations]
+            *[CausalBlock(channels, kernel_size, d, residual) for d in self.dilations]
         )
         self.values = nn.Linear(channels, spec.OUTPUT_SIZE)
         self.confidence = nn.Linear(channels, spec.CONFIDENCE_SIZE)

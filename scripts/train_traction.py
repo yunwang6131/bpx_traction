@@ -79,8 +79,11 @@ def main() -> None:
     parser.add_argument("--channels", type=int, default=64)
     parser.add_argument("--blocks", type=int, default=4)
     parser.add_argument("--dilations", type=int, nargs="+", default=None,
-                        help="每个 TCN 块的空洞率，如 1 2 4 8。默认全 1。"
-                             "全 1 时感受野 180 ms，连半个步态周期(450ms)都不到")
+                        help="每个 TCN 块的空洞率。不给=用模型默认的 1 2 4 8（感受野 620 ms）。"
+                             "给 1 1 1 1 退回参考实现的 180 ms，连半个步态周期都不到")
+    parser.add_argument("--residual", action="store_true",
+                        help="TCN 块加残差连接。空洞带来 gridding 伪影，"
+                             "最新帧只有一条通路，残差给它一条直通路")
     parser.add_argument("--patience", type=int, default=25,
                         help="验收指标多少轮没改善就停")
     parser.add_argument("--no-balance", dest="no_balance", action="store_true",
@@ -113,8 +116,11 @@ def main() -> None:
     print("[traction] 力桶：" + "  ".join(
         f"{name} {len(idx):,}" for name, idx in buckets.items()))
 
+    # 不给 --dilations 就用模型默认的 (1,2,4,8)。**不能**直接把 None 传进去 ——
+    # ForceTCN 把 None 解释成"全 1 空洞"（消融用），那会静默地把默认值覆盖掉。
+    dilation_kwargs = {} if args.dilations is None else {"dilations": args.dilations}
     model = ForceTCN(channels=args.channels, blocks=args.blocks,
-                     dilations=args.dilations).to(device)
+                     residual=args.residual, **dilation_kwargs).to(device)
     cycles = model.gait_cycles_visible()
     print(f"[traction] 参数 {count_parameters(model):,}  空洞率 {model.dilations}\n"
           f"[traction] 感受野 {model.receptive_field()} 帧 = "
@@ -178,7 +184,7 @@ def main() -> None:
             torch.save({
                 "model": model.state_dict(),
                 "channels": args.channels, "blocks": args.blocks,
-                "dilations": model.dilations,
+                "dilations": model.dilations, "residual": model.residual,
                 "input_dim": spec.FRAME_SIZE,
                 "epoch": epoch, "score_xy_rmse_n": score,
             }, out / "estimator.pt")
@@ -197,7 +203,8 @@ def main() -> None:
     # 用最好的那版导出
     checkpoint = torch.load(out / "estimator.pt", map_location="cpu")
     model = ForceTCN(channels=checkpoint["channels"], blocks=checkpoint["blocks"],
-                     dilations=checkpoint.get("dilations")).eval()
+                     dilations=checkpoint.get("dilations"),
+                     residual=checkpoint.get("residual", False)).eval()
     model.load_state_dict(checkpoint["model"])
     wrapped = NormalizedForceTCN(
         model, torch.from_numpy(normalizer.mean), torch.from_numpy(normalizer.std)
