@@ -14,9 +14,10 @@
 一变，以前采的数据就对不上列名了。
 
 ```
-板子 ~/wy/
-  bpx_flat_freq_np3o_deploy_v4/     辨识那条线，别动
-  bpx_flat_freq_np3o_deploy_v6/     牵引数据采集，新建
+板子 10.21.20.100（RK3588，用户 cat）~/wy/
+  bpx_flat_freq_np3o_deploy_v4/     有记录器，辨识那条线在用，别动
+  bpx_flat_freq_np3o_deploy_v5/     没有记录器（记录代码被删了），别动
+  bpx_flat_freq_np3o_deploy_v6/     牵引数据采集，**从 v4 分**（v5 没记录器）
 ```
 
 两个目录各自独立，策略、配置、日志都不共享。
@@ -29,7 +30,7 @@
 
 ```bash
 cd ~/intern/ZGYD/bpx
-scp <板子>:~/wy/bpx_flat_freq_np3o_deploy_v4/bpx_dual_pad.py /tmp/v4_from_board.py
+scp 10.21.20.100:~/wy/bpx_flat_freq_np3o_deploy_v4/bpx_dual_pad.py /tmp/v4_from_board.py
 python bpx_traction/board/make_v6.py /tmp/v4_from_board.py /tmp/v6_bpx_dual_pad.py
 ```
 
@@ -45,14 +46,14 @@ diff /tmp/v4_from_board.py /tmp/v6_bpx_dual_pad.py
 ## 二、部署到板子
 
 ```bash
-ssh <板子>
+ssh 10.21.20.100
 cp -r ~/wy/bpx_flat_freq_np3o_deploy_v4 ~/wy/bpx_flat_freq_np3o_deploy_v6
 ```
 
 然后把生成的文件拷进去：
 
 ```bash
-scp /tmp/v6_bpx_dual_pad.py <板子>:~/wy/bpx_flat_freq_np3o_deploy_v6/bpx_dual_pad.py
+scp /tmp/v6_bpx_dual_pad.py 10.21.20.100:~/wy/bpx_flat_freq_np3o_deploy_v6/bpx_dual_pad.py
 ```
 
 v6 目录里的 `policy.onnx` / `deploy.yaml` 是 v4 拷过来的，不用换 —— 采数据用哪个策略
@@ -111,7 +112,7 @@ v6 目录里的 `policy.onnx` / `deploy.yaml` 是 v4 拷过来的，不用换 �
 ## 五、拿回来之后
 
 ```bash
-scp -r <板子>:~/wy/bpx_flat_freq_np3o_deploy_v6/log/rec_* ~/intern/ZGYD/bpx/logs/real_v6/
+scp -r 10.21.20.100:~/wy/bpx_flat_freq_np3o_deploy_v6/log/rec_* ~/intern/ZGYD/bpx/logs/real_v6/
 python scripts/check_board_data.py --root logs/real_v6
 ```
 
