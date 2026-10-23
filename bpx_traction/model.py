@@ -75,16 +75,38 @@ class ForceTCN(nn.Module):
         channels: int = 64,
         blocks: int = 4,
         kernel_size: int = 3,
+        dilations: "list[int] | tuple[int, ...] | None" = (1, 2, 4, 8),
     ):
         super().__init__()
         self.input_dim = input_dim
         self.channels = channels
         self.kernel_size = kernel_size
         self.num_blocks = blocks
+        #: 每个 TCN 块的空洞率。``None`` = 全 1（参考实现的做法，**已被实测否定**）。
+        #:
+        #: **为什么要用空洞**：全 1 时感受野只有 ``1 + 4×(3−1) = 9`` 帧 = 180 ms，
+        #: 而 BPX 的步态周期是 0.45 s = 22.5 帧（`bpx_rma` 的 `GAIT_PERIOD`）——
+        #: 网络连半个步态周期都看不到，没法把"支撑相在蹬地"和"有人在拉我"分开。
+        #: 历史窗口有 25 帧（500 ms，整整一个周期），数据在那儿，卷积够不着而已。
+        #:
+        #: ``[1, 2, 4, 8]`` 下感受野 = ``1 + 2×(1+2+4+8) = 31`` 帧 = 620 ms，
+        #: 覆盖一个完整周期还有余量。**参数量一点不变** —— 空洞是免费的。
+        #:
+        #: 实测（同数据同超参，测试集 22k 样本）：
+        #:   xy 向量 RMSE 4.945 → 4.410 N（−10.8%）
+        #:   xy 方向均值 14.57° → 12.26°（−15.9%），15–30 N 段 8.04° → 6.58°
+        #: 所以默认就是 ``(1, 2, 4, 8)``。但注意**零力误报没有改善**
+        #: （P95 5.11 → 5.06 N）—— 那一截误差不是感受野造成的，见
+        #: `docs/traction_plan.md` 对零力误差下限的分析。
+        self.dilations = list(dilations) if dilations else [1] * blocks
+        if len(self.dilations) != blocks:
+            raise ValueError(
+                f"给了 {len(self.dilations)} 个空洞率，但有 {blocks} 个块"
+            )
 
         self.encoder = nn.Conv1d(input_dim, channels, kernel_size=1)
         self.tcn = nn.Sequential(
-            *[CausalBlock(channels, kernel_size) for _ in range(blocks)]
+            *[CausalBlock(channels, kernel_size, d) for d in self.dilations]
         )
         self.values = nn.Linear(channels, spec.OUTPUT_SIZE)
         self.confidence = nn.Linear(channels, spec.CONFIDENCE_SIZE)
@@ -96,12 +118,17 @@ class ForceTCN(nn.Module):
             self._heads.append((begin, end, act == "tanh", scale, offset))
 
     def receptive_field(self) -> int:
-        """能看到多少帧历史。编码器 kernel=1 不扩，每个 TCN 块扩 (k−1)。"""
-        return 1 + self.num_blocks * (self.kernel_size - 1)
+        """能看到多少帧历史。编码器 kernel=1 不扩，每个 TCN 块扩 (k−1)·dilation。"""
+        return 1 + sum((self.kernel_size - 1) * d for d in self.dilations)
 
     def receptive_field_s(self) -> float:
-        """感受野换算成秒 —— 这是响应延迟的结构下限。"""
+        """感受野换算成秒 —— 这同时是响应延迟的结构下限、和能看到多少步态周期。"""
         return self.receptive_field() * spec.SAMPLE_PERIOD_S
+
+    def gait_cycles_visible(self, gait_period_s: float = 0.45) -> float:
+        """感受野覆盖几个步态周期。<1 的话网络看不到周期性模式，
+        分不清"支撑相在蹬地"和"有外力"。"""
+        return self.receptive_field_s() / gait_period_s
 
     def forward(self, history: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # (B, T, D) -> (B, D, T)

@@ -292,20 +292,35 @@ def check_model(report: Report) -> None:
     if values.shape[1] != spec.OUTPUT_SIZE or confidence.shape[1] != spec.CONFIDENCE_SIZE:
         report.fail("模型结构", f"输出维数不对：{values.shape} / {confidence.shape}")
         return
+    cycles = net.gait_cycles_visible()
     report.ok(
         "模型结构",
-        f"{count_parameters(net):,} 参数，感受野 {net.receptive_field()} 帧 = "
-        f"{net.receptive_field_s() * 1000:.0f} ms",
+        f"{count_parameters(net):,} 参数，空洞率 {net.dilations}\n"
+        f"感受野 {net.receptive_field()} 帧 = {net.receptive_field_s() * 1000:.0f} ms "
+        f"= {cycles:.2f} 个步态周期",
     )
+    if cycles < 1.0:
+        report.warn(
+            "感受野覆盖步态周期",
+            f"只覆盖 {cycles:.2f} 个周期 —— 网络看不到周期性模式，分不清"
+            f"'支撑相在蹬地'和'有外力'。实测全 1 空洞比 (1,2,4,8) 的 "
+            f"xy RMSE 差 10.8%、方向差 15.9%。",
+        )
+    else:
+        report.ok("感受野覆盖步态周期", f"{cycles:.2f} 个（步态周期 0.45 s）")
 
-    # 因果性：改动感受野之外的老帧，输出必须逐位不变
-    outside = spec.HISTORY_LENGTH - net.receptive_field()
-    x2 = x.clone()
-    x2[:, :outside] = torch.randn(2, outside, spec.FRAME_SIZE) * 50.0
+    # 因果性：改动感受野之外的老帧，输出必须逐位不变。
+    # 默认空洞下感受野 31 帧 > 窗口 25 帧，没有"外面"的帧可改，所以这条结构性质
+    # 用非空洞版来验（感受野 9 < 25）。两者共用同一个 CausalBlock。
+    plain = ForceTCN(dilations=None).eval()
+    outside = spec.HISTORY_LENGTH - plain.receptive_field()
     with torch.no_grad():
-        v2, c2 = net(x2)
-    if torch.equal(values, v2) and torch.equal(confidence, c2):
-        report.ok("因果卷积", f"最老的 {outside} 帧不影响输出")
+        base_v, base_c = plain(x)
+        x2 = x.clone()
+        x2[:, :outside] = torch.randn(2, outside, spec.FRAME_SIZE) * 50.0
+        v2, c2 = plain(x2)
+    if torch.equal(base_v, v2) and torch.equal(base_c, c2):
+        report.ok("因果卷积", f"非空洞版：最老的 {outside} 帧不影响输出")
     else:
         report.fail("因果卷积", "感受野之外的帧影响了输出 —— padding 不是因果的")
 

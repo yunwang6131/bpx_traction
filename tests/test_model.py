@@ -55,29 +55,57 @@ def test_parameter_count_is_small_enough_for_the_board(net):
 # --------------------------------------------------------------------------
 # 因果性 —— 最重要的两条
 # --------------------------------------------------------------------------
-def test_receptive_field_is_nine_frames(net):
-    assert net.receptive_field() == 1 + 4 * (3 - 1) == 9
-    assert net.receptive_field_s() == pytest.approx(9 * spec.SAMPLE_PERIOD_S)
-    assert net.receptive_field_s() == pytest.approx(0.18), "180 ms，响应延迟的结构下限"
+def test_receptive_field_covers_a_gait_cycle(net):
+    """默认空洞率必须让感受野至少覆盖一个完整步态周期。
+
+    这是实测出来的要求，不是审美：全 1 空洞时感受野只有 9 帧 = 180 ms，
+    而步态周期是 0.45 s —— 网络看不到周期性模式，分不清"支撑相在蹬地"和"有外力"。
+    改成 (1,2,4,8) 之后 xy 向量 RMSE 降了 10.8%、方向误差降了 15.9%，参数量一个没多。
+    """
+    assert net.dilations == [1, 2, 4, 8], "默认空洞率变了，下面的结论要重新验"
+    assert net.receptive_field() == 1 + 2 * (1 + 2 + 4 + 8) == 31
+    assert net.gait_cycles_visible() >= 1.0, (
+        f"感受野只覆盖 {net.gait_cycles_visible():.2f} 个步态周期"
+    )
+    assert net.receptive_field_s() == pytest.approx(0.62)
 
 
-def test_frames_outside_receptive_field_do_not_matter(net):
-    """感受野是 9 帧，窗口是 25 帧 —— 改动最老的 16 帧，输出应当逐位不变。
+def test_dilation_is_free(net):
+    """空洞不增加参数 —— 这是它比"加层/加宽"更划算的全部理由。"""
+    plain = ForceTCN(dilations=None)
+    assert count_parameters(plain) == count_parameters(net)
+    assert plain.receptive_field() == 9, "全 1 空洞时应当退回 9 帧"
 
-    这同时验证了两件事：padding 是因果的（否则感受野会更大或含义不明），
-    以及感受野的计算没算错。
+
+def test_frames_outside_receptive_field_do_not_matter():
+    """感受野之外的帧必须逐位不影响输出 —— 这验证 padding 是因果的。
+
+    默认空洞下感受野 31 帧 > 窗口 25 帧，没有"外面"的帧可改，
+    所以用全 1 空洞那版（感受野 9 帧）来验这条结构性质。
     """
     torch.manual_seed(1)
+    plain = ForceTCN(dilations=None).eval()
     x = torch.randn(3, T, D)
-    v0, c0 = net(x)
+    v0, c0 = plain(x)
 
-    outside = T - net.receptive_field()          # 25 - 9 = 16
+    outside = T - plain.receptive_field()          # 25 - 9 = 16
     x2 = x.clone()
     x2[:, :outside] = torch.randn(3, outside, D) * 50.0   # 老帧改成完全不同的大数
 
-    v1, c1 = net(x2)
+    v1, c1 = plain(x2)
     assert torch.equal(v0, v1), "感受野外的帧影响了输出 —— padding 不是因果的？"
     assert torch.equal(c0, c1)
+
+
+def test_default_model_uses_the_whole_window(net):
+    """默认空洞下感受野超过窗口，所以**每一帧**都该影响输出 —— 包括最老的那帧。"""
+    torch.manual_seed(5)
+    x = torch.randn(2, T, D)
+    base, _ = net(x)
+    for frame in (0, T // 2, T - 1):
+        probe = x.clone()
+        probe[:, frame] += 2.0
+        assert not torch.equal(net(probe)[0], base), f"第 {frame} 帧没影响输出"
 
 
 def test_last_frame_always_matters(net):
@@ -103,13 +131,21 @@ def test_time_direction_matches_the_contract(net):
     x = torch.randn(2, T, D)
     base, _ = net(x)
 
-    newest = x.clone()
-    newest[:, -1] += 3.0                  # 动最新帧 → 必须变
-    oldest = x.clone()
-    oldest[:, 0] += 3.0                   # 动最旧帧（感受野外）→ 必须不变
+    def sensitivity(frame: int) -> float:
+        probe = x.clone()
+        probe[:, frame] += 3.0
+        return float((net(probe)[0] - base).abs().mean())
 
-    assert not torch.equal(net(newest)[0], base), "最新帧没影响输出 —— 时间方向反了？"
-    assert torch.equal(net(oldest)[0], base), "最旧帧影响了输出 —— 时间方向反了？"
+    # 最新帧必须影响输出。
+    assert sensitivity(T - 1) > 0, "最新帧完全不影响输出 —— 时间方向反了？"
+
+    # ⚠️ 这里**不能**断言"越新越敏感"。空洞卷积有 gridding 伪影：从输出位置回溯，
+    # 可达偏移是 a₁·1 + a₂·2 + a₃·4 + a₄·8（aᵢ∈{0,1,2}），偏移 0（最新帧）只有一条
+    # 通路，而中间偏移有好几条 —— 实测最旧帧的敏感度反而是最新帧的 4 倍。
+    # 这是结构性的，不是 bug，但它说明当前帧的连接偏弱（残差连接是标准解法）。
+    #
+    # 时间方向的**硬保证**由 test_frames_outside_receptive_field_do_not_matter
+    # 在非空洞版上验（感受野 9 < 窗口 25，能干净地验因果性）。
 
 
 # --------------------------------------------------------------------------

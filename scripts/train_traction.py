@@ -78,6 +78,9 @@ def main() -> None:
     parser.add_argument("--weight-decay", dest="weight_decay", type=float, default=1e-4)
     parser.add_argument("--channels", type=int, default=64)
     parser.add_argument("--blocks", type=int, default=4)
+    parser.add_argument("--dilations", type=int, nargs="+", default=None,
+                        help="每个 TCN 块的空洞率，如 1 2 4 8。默认全 1。"
+                             "全 1 时感受野 180 ms，连半个步态周期(450ms)都不到")
     parser.add_argument("--patience", type=int, default=25,
                         help="验收指标多少轮没改善就停")
     parser.add_argument("--no-balance", dest="no_balance", action="store_true",
@@ -110,9 +113,13 @@ def main() -> None:
     print("[traction] 力桶：" + "  ".join(
         f"{name} {len(idx):,}" for name, idx in buckets.items()))
 
-    model = ForceTCN(channels=args.channels, blocks=args.blocks).to(device)
-    print(f"[traction] 参数 {count_parameters(model):,}  "
-          f"感受野 {model.receptive_field()} 帧 = {model.receptive_field_s() * 1000:.0f} ms")
+    model = ForceTCN(channels=args.channels, blocks=args.blocks,
+                     dilations=args.dilations).to(device)
+    cycles = model.gait_cycles_visible()
+    print(f"[traction] 参数 {count_parameters(model):,}  空洞率 {model.dilations}\n"
+          f"[traction] 感受野 {model.receptive_field()} 帧 = "
+          f"{model.receptive_field_s() * 1000:.0f} ms = {cycles:.2f} 个步态周期"
+          + ("" if cycles >= 1.0 else "  ⚠️ 不到一个周期，看不到周期性模式"))
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                   weight_decay=args.weight_decay)
@@ -171,6 +178,7 @@ def main() -> None:
             torch.save({
                 "model": model.state_dict(),
                 "channels": args.channels, "blocks": args.blocks,
+                "dilations": model.dilations,
                 "input_dim": spec.FRAME_SIZE,
                 "epoch": epoch, "score_xy_rmse_n": score,
             }, out / "estimator.pt")
@@ -188,7 +196,8 @@ def main() -> None:
 
     # 用最好的那版导出
     checkpoint = torch.load(out / "estimator.pt", map_location="cpu")
-    model = ForceTCN(channels=checkpoint["channels"], blocks=checkpoint["blocks"]).eval()
+    model = ForceTCN(channels=checkpoint["channels"], blocks=checkpoint["blocks"],
+                     dilations=checkpoint.get("dilations")).eval()
     model.load_state_dict(checkpoint["model"])
     wrapped = NormalizedForceTCN(
         model, torch.from_numpy(normalizer.mean), torch.from_numpy(normalizer.std)
@@ -220,6 +229,8 @@ def main() -> None:
         "budget_pass": bool(best["score"] <= budget),
         "parameters": count_parameters(model),
         "receptive_field_frames": model.receptive_field(),
+        "dilations": model.dilations,
+        "gait_cycles_visible": round(model.gait_cycles_visible(), 3),
         "torchscript_parity_max_abs": parity,
         "balanced_batches": not args.no_balance,
         "loss_weights": vars(weights),
