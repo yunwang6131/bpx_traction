@@ -65,11 +65,17 @@ RECORD_EXTRA_SENSORS = True   # 翻 False 跑一段，和 True 那段的 snap_us
                     omega = vec(client.getImuOmegaHighRate(), 3, 'imu_omega_high_rate')
                     quat = vec(client.getImuQuatHighRate(), 4, 'imu_quat_high_rate')
                     # --- v6 新增：力估计器要的两组量 ---
+                    # 读不到就记 NaN，**绝不让采数据的附加项拖垮控制回路**。
+                    # 不包这层 try 的话：getter 返回 None -> vec() 抛异常 -> 被外面的
+                    # except Exception: continue 吞掉 -> 重试三次后整个快照返回 None
+                    # -> 控制循环报「状态未就绪/超时」。发生在走路中间就是控制断链。
+                    tau, acc = np.full(12, np.nan), np.full(3, np.nan)
                     if RECORD_EXTRA_SENSORS:
-                        tau = vec(client.getJointTorqueHighRate(), 12, 'joint_torque_high_rate')
-                        acc = vec(client.getImuAccHighRate(), 3, 'imu_acc_high_rate')
-                    else:
-                        tau, acc = np.full(12, np.nan), np.full(3, np.nan)
+                        try:
+                            tau = vec(client.getJointTorqueHighRate(), 12, 'joint_torque_high_rate')
+                            acc = vec(client.getImuAccHighRate(), 3, 'imu_acc_high_rate')
+                        except Exception:
+                            pass
                     robot_ts = client.getJointStateTimestampHighRate()
                     seq1 = int(client.getJointStateSeqHighRate())
                     _snap_us = (mono() - _snap_t0) * 1e6"""),
