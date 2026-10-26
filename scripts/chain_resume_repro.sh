@@ -57,11 +57,17 @@ seed_into "$S4" "$E7" "s4seed_teacher"
 train_retry "$E7" "Isaac-Velocity-Flat-BpxPro-Sprint7-v0" 1200 "teacher" ".*s4seed_teacher" "logs/repro_sprint7.log"
 
 # ④ 蒸馏 + 导出（带重试）
+# ⚠️ teacher 要精确 run 名，不能用 ".*_teacher"：get_checkpoint_path 默认 sort_alpha=True
+#    按字母序取最后一个，而第③步在 ${E7} 里留了 "s4seed_teacher"，字母序排在时间戳目录
+#    之后 —— 通配会选中种子（= sprint4 的产物）。第 55 行用的就是下面这个正确写法。
+T7=$(ls -dt logs/rsl_rl/${E7}/*_teacher 2>/dev/null | grep -v s4seed | head -1)
+[ -z "${T7}" ] && { echo "[repro] 找不到 ${E7} 的 teacher run"; exit 1; }
+T7RUN=$(basename "${T7}")
 for try in 1 2 3; do
-    echo "[repro] $(date '+%F %T') 蒸馏 ${E7}/student (第${try}次)"
+    echo "[repro] $(date '+%F %T') 蒸馏 ${E7}/student (第${try}次)  teacher=${T7RUN}"
     python -u scripts/train.py --headless --task Isaac-Velocity-Flat-BpxPro-Sprint7-v0 \
         --num_envs 4096 --max_iterations 1500 --agent rsl_rl_distillation_cfg_entry_point \
-        --load-run ".*_teacher" --experiment-name "${E7}" --run-name student \
+        --load-run "^${T7RUN}$" --experiment-name "${E7}" --run-name student \
         > logs/repro_student.log 2>&1
     [ $? -eq 0 ] && grep -q "iteration 1499/" logs/repro_student.log && { echo "[repro] 蒸馏 ✓"; break; }
     echo "[repro] 蒸馏第${try}次失败，重试"; sleep 20

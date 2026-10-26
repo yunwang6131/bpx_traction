@@ -689,6 +689,105 @@ class BpxProFlatSprint7EnvCfg(BpxProFlatSprint4EnvCfg):
 
 
 @configclass
+class BpxProFlatSprint9EnvCfg(BpxProFlatSprint7EnvCfg):
+    """Sprint 第九版：破"冷启动站桩" + 跟上抬高后的电机包络。
+
+    继承 sprint7 的全部（能量门控、抬脚 deficit、横滚修复、辨识 DR、45 维不碰板子），
+    只加四件事。依据是 2026-10-26 的两组实测（`logs/sim2sim_s7_*`，MuJoCo corrected，
+    用 released/bpx_pro_sprint7 的 student ONNX）：
+
+    * **转速上限从 URDF 的 15/22 抬到 30 之后（见 spec.VELOCITY_LIMIT），sprint7 一行
+      没训就 4.54 → 5.37 m/s**。卡点是**髋**不是膝：髋 dq 在 25.5 rad/s 饱和（可用
+      力矩只剩 9.8 N·m），髋/速 比值 4.8；膝/速 只有 2.91，新上限下绰绰有余。
+      6 m/s 需要髋/速 降到 ~4.2 —— 是步态问题，不是电机问题。
+    * **站桩是冷启动问题，和能量门控无关**：同指令 6.0，逐级加速进来跑 5.37 m/s，
+      从站立直接给则 0.00（蹲到 0.27 m、倾斜 17.6° 冻住）。冷启动阶跃的安全上限
+      实测只到 4.0，而 4.5 在训练范围 (−2, 5.0) 以内 —— 不是 OOD，是奖励死区。
+
+    四件事：
+
+    1. ``lin_vel_deficit``（−0.3）：单边线性速度亏空，永不饱和。**主力改动**，
+       补上 exp 跟踪核在大误差处的梯度死区。量级：指令 5.0 站着不动付 1.5/s，
+       跑到 4.3 只付 0.21/s —— 1.3/s 的梯度直接指向"跑起来"。
+    2. ``foot_clearance`` 接速度门控（gate_min 0.3）：它是最大的单项惩罚
+       （−0.254/s）且"站着=0、跑=满额"，sprint7 漏掉没门控，高指令下把账算成了
+       站桩划算。低速仍全额，7 cm 不丢。
+    3. 加 ``bad_orientation``(0.5 rad) + ``low_height``(0.28 m) 终止：原来只有躯干
+       触地算失败，所以"倾斜 17.6° 的蹲姿冻结"在训练里从不被终止，策略学会了进这个
+       坑。0.28 是卡着实测选的 —— 高于冻结姿态的 0.268–0.273、低于奔跑时的 0.356。
+       这两项是保险，真正治站桩的是第 1 条。
+    4. 指令上限 5.0 → 6.5，匹配新包络（髋零力矩墙约 6.1 m/s）。
+
+    **门控档位沿用 sprint7 的 v_lo 2.0 / v_hi 4.5，不学 sprint8。** sprint8 把旋钮
+    开到头（gate_min 0.03、v_hi 5.5、指令 6.0）的结果是跟踪误差 1.17 → 2.53、脚动得
+    更少、几乎不摔 —— 典型的站桩恶化。那条路验证过是错的。
+
+    **为什么不门控 ``hip_roll_deviation``**：它只有 −0.117/s，而且髋 roll（外展）对
+    前向奔跑本来就不该大幅摆动；门控它的收益比第 1 条小一个量级，却要冒重新长出
+    sprint3 修掉的"蜘蛛腿"的风险。不划算，不动。
+
+    ⚠️ 若设了 ``BPX_S4_CLEARANCE=quad:*``，第 2 条会把它改回线性门控版（那个环境
+    变量只给 sprint4 对照组复刻剂量路径用，这里不适用）。
+
+    预期代价：高速抬脚会比 sprint7 低一些（门控放的），新终止项让早期回合变短。
+    续训不受影响 —— 观测维度 / 动作维度一个没动，sprint7 的 teacher 权重直接能用。
+    """
+
+    #: 抬脚门控的高速残余比例。0.3 = 高指令下只罚 30%。调它要同时复测 foot_apex。
+    CLEARANCE_GATE_MIN = 0.3
+    #: 速度亏空权重。调大更敢冲但更容易"扑出去"（靠第 3 条的终止项兜）。
+    VEL_DEFICIT_WEIGHT = -0.3
+    #: 蹲姿冻结的判据。实测冻结在 0.268–0.273、奔跑在 0.356 以上，取中间偏下。
+    MIN_HEIGHT = 0.28
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # ① 单边线性速度亏空 —— 破冷启动站桩的主力
+        self.rewards.lin_vel_deficit = RewTerm(
+            func=mdp.lin_vel_deficit,
+            weight=self.VEL_DEFICIT_WEIGHT,
+            params={"command_name": "base_velocity"},
+        )
+
+        # ② 抬脚惩罚接速度门控（保留 sprint4 的权重 −3.0 和 7 cm 目标）
+        _fc = self.rewards.foot_clearance
+        _fc.func = mdp.foot_clearance_deficit_gated
+        _fc.params = {**_fc.params, **self.GATE, "gate_min": self.CLEARANCE_GATE_MIN}
+
+        # ③ 终止项：打掉"蹲姿冻结"这个吸引子
+        self.terminations.bad_orientation = DoneTerm(
+            func=mdp.bad_orientation, params={"limit_angle": 0.5}
+        )
+        self.terminations.low_height = DoneTerm(
+            func=mdp.root_height_below_minimum, params={"minimum_height": self.MIN_HEIGHT}
+        )
+
+        # ④ 指令上限按新包络（横移 ±0.8 和倒车 −2.0 不动）
+        self.commands.base_velocity.ranges.lin_vel_x = (-2.0, 6.5)
+
+
+@configclass
+class BpxProFlatSprint9EnvCfg_PLAY(BpxProFlatSprint9EnvCfg):
+    """Sprint9 的回放 / 导出配置。
+
+    终止项故意保留（和 base_contact 一个道理）：play 里真触发了就是个发现。
+    冷启动测试直接用 ``play.py --vx 6.0``（--ramp 默认 0 = 阶跃指令）。
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 50
+        self.episode_length_s = 40.0
+        self.observations.policy.enable_corruption = False
+        self.events.push_robot = None
+        self.events.base_com = None
+        self.commands.base_velocity.ranges.lin_vel_x = (3.0, 3.0)
+        self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+        self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+
+
+@configclass
 class BpxProFlatSprint8EnvCfg(BpxProFlatSprint7EnvCfg):
     """Sprint 第八版：**极速强化**。在 sprint7 能量门控基础上把旋钮全调开,冲 5.0-5.5。
 

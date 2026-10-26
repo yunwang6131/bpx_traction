@@ -124,6 +124,54 @@ def foot_clearance_deficit(
     return torch.sum(deficit * foot_velocity_tanh, dim=1)
 
 
+def foot_clearance_deficit_gated(
+    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, target_height: float, tanh_mult: float,
+    command_name: str = "base_velocity", v_lo: float = 2.0, v_hi: float = 4.5, gate_min: float = 0.3,
+) -> torch.Tensor:
+    """抬脚亏空惩罚 × 速度门控。高速时放松抬脚要求。
+
+    为什么要门控它：sprint7 的能量门控只罩了力矩 / 加速度 / 动作率，抬脚这一项
+    （权重 −3.0，回合内 −0.254/s，是最大的单项惩罚）**完全没门控**，而它恰好是
+    "站着不动 = 0 分、跑起来 = 满额扣分" 的形态（足端水平速度 tanh 门控，脚不动
+    就不扣）。于是高指令下"站桩"比"冲"划算：指令 5.0 时跑到 4.3 的跟踪奖励上限
+    只有 1.5·exp(−0.7²/0.25) = 0.21/s，而抬脚一项就要付 0.25/s。
+
+    物理上也站得住：高速奔跑的摆动弧线本来就该更平更长，强求 7 cm 离地是在和速度
+    打架。低速（≤v_lo）仍是全额，sprint4 挣到的 7 cm 不丢。
+    """
+    base = foot_clearance_deficit(env, asset_cfg, target_height, tanh_mult)
+    return base * _speed_gate(env, command_name, v_lo, v_hi, gate_min)
+
+
+def lin_vel_deficit(
+    env: ManagerBasedRLEnv, command_name: str = "base_velocity",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """单边线性速度亏空：实测速度在指令方向上的分量低于 |cmd_vx| 的差值（权重取负）。
+
+    **这一项是破"冷启动站桩"的主力。** 根因不在惩罚侧而在奖励侧：
+    ``track_lin_vel_xy_exp`` 的 exp 核 std=0.5，误差超过 ~1.5 m/s 就饱和到 ≈0，于是
+    指令 5.0 下"站着不动"(err 5.0 → 0 分) 和"跑到 3.0"(err 2.0 → 1e-7 分) 几乎同分，
+    从站立爬到奔跑这一路**没有梯度**，策略只能停在原地那个局部最优里。
+
+    实测证据（MuJoCo corrected，sprint7，`logs/sim2sim_s7_*`，2026-10-26）：同一个
+    策略、同一个指令 6.0、同一套电机包络 —— 逐级加速进来跑 **5.37 m/s**，从站立直接
+    给则 **0.00 m/s**（蹲到 0.27 m、倾斜 17.6° 冻住）。能力是有的，起不来。冷启动
+    阶跃的安全上限实测只到 4.0，而 4.5 在训练指令范围 (−2, 5.0) **以内** —— 所以这
+    不是 OOD，是奖励死区。
+
+    线性亏空在整个区间梯度恒定、永不饱和，从 v=0 起就一直指向"再快一点"。和
+    :func:`foot_clearance_deficit` 当年从二次型换成单边线性是同一个修法。
+
+    自带定向性，不伤低速：指令跟得上时亏空 ≈0（1.5 m/s 下实测误差 0.05，几乎不扣
+    分），只在"该快却慢"时才咬。超速不奖励（clamp 到 0）；零指令不受影响
+    （sign(0)=0 → 恒为 0，站立环境不被这一项推着动）。
+    """
+    cmd = env.command_manager.get_command(command_name)[:, 0]
+    vx = env.scene[asset_cfg.name].data.root_lin_vel_b[:, 0]
+    return (cmd.abs() - vx * torch.sign(cmd)).clamp(min=0.0)
+
+
 def feet_gait(
     env: ManagerBasedRLEnv,
     period: float,

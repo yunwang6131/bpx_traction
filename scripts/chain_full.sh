@@ -67,10 +67,17 @@ train "${E7}" "Isaac-Velocity-Flat-BpxPro-Sprint7-v0" 1200 "teacher" ".*step2see
 # 切换标准: 斜坡极速 ≥4.3 且 低速不退化（见 TRAINING.md §3③）
 
 # ============ ④ 蒸馏 + 导出 ============
-echo "[full] $(date '+%F %T') 蒸馏 ${E7}/student (1500)"
+# ⚠️ teacher 必须用**精确 run 名**，不能用 ".*_teacher"：isaaclab 的 get_checkpoint_path
+#    默认 sort_alpha=True，按字母序取最后一个匹配项。而第③步在 ${E7} 里留了个种子目录
+#    "step2seed_teacher"，它的字母序排在时间戳目录 "2026-..." 之后（数字 ASCII < 字母），
+#    所以 ".*_teacher" 会选中**种子**（= sprint4 的产物），蒸出来的 student 对错了 teacher。
+T7=$(ls -dt logs/rsl_rl/${E7}/*_teacher 2>/dev/null | grep -v 'step2seed_teacher' | head -1)
+[ -z "${T7}" ] && { echo "[full] 找不到 ${E7} 的 teacher run"; exit 1; }
+T7RUN=$(basename "${T7}")
+echo "[full] $(date '+%F %T') 蒸馏 ${E7}/student (1500)  teacher=${T7RUN}"
 python -u scripts/train.py --headless --task Isaac-Velocity-Flat-BpxPro-Sprint7-v0 \
     --num_envs 4096 --max_iterations 1500 --agent rsl_rl_distillation_cfg_entry_point \
-    --load-run ".*_teacher" --experiment-name "${E7}" --run-name student \
+    --load-run "^${T7RUN}$" --experiment-name "${E7}" --run-name student \
     > "logs/full_${E7}_student.log" 2>&1
 rc=$?; echo "[full] student 退出码 ${rc}"; [ ${rc} -ne 0 ] && exit 1
 sleep 20

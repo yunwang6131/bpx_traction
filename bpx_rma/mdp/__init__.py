@@ -15,9 +15,11 @@ from .rewards import (  # noqa: F401
     feet_gait,
     flat_orientation_roll_l2,
     foot_clearance_deficit,
+    foot_clearance_deficit_gated,
     foot_clearance_penalty,
     joint_acc_l2_gated,
     joint_torques_l2_gated,
+    lin_vel_deficit,
 )
 from .observations import (  # noqa: F401
     actuator_armature_ratio,

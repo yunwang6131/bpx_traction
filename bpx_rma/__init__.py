@@ -166,6 +166,28 @@ gym.register(
 )
 
 gym.register(
+    id="Isaac-Velocity-Flat-BpxPro-Sprint9-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{_ENV}:BpxProFlatSprint9EnvCfg",
+        "rsl_rl_cfg_entry_point": f"{_AGENTS}:BpxProFlatPPORunnerCfg",
+        "rsl_rl_distillation_cfg_entry_point": f"{_AGENTS}:BpxProFlatDistillationRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Flat-BpxPro-Sprint9-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{_ENV}:BpxProFlatSprint9EnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{_AGENTS}:BpxProFlatPPORunnerCfg",
+        "rsl_rl_distillation_cfg_entry_point": f"{_AGENTS}:BpxProFlatDistillationRunnerCfg",
+    },
+)
+
+gym.register(
     id="Isaac-Velocity-Flat-BpxPro-Sprint8-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
