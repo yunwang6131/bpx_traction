@@ -4,7 +4,7 @@
     conda activate bpx_rma
     python scripts/eval_traction.py
 
-不需要 Isaac Sim。默认读 `logs/traction/estimator/estimator.ts` 和
+不需要 Isaac Sim。默认读 `spec.DEFAULT_ESTIMATOR_DIR` 下的 estimator.ts 和
 `logs/traction/dataset/test.npz`。
 
 报什么：分量 / 幅值 / **xy 向量误差**（映射实际消费的那个量）/ xy 平面内的方向误差 /
@@ -35,7 +35,7 @@ from bpx_traction.mapping import AdmittanceMapping, AdmittanceParams  # noqa: E4
 def main() -> None:
     parser = argparse.ArgumentParser(description="力估计器离线验收")
     parser.add_argument("--model", type=str, default=None,
-                        help="TorchScript 路径，默认 logs/traction/estimator/estimator.ts")
+                        help="TorchScript 路径，默认 spec.DEFAULT_ESTIMATOR_DIR/estimator.ts")
     parser.add_argument("--dataset", type=str, default=None)
     parser.add_argument("--split", type=str, default="test")
     parser.add_argument("--output", type=str, default=None)
@@ -45,7 +45,7 @@ def main() -> None:
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     model_path = Path(args.model) if args.model else (
-        spec.TRACTION_LOG_DIR / "estimator" / "estimator.ts")
+        spec.DEFAULT_ESTIMATOR_DIR / "estimator.ts")
     root = Path(args.dataset) if args.dataset else spec.TRACTION_LOG_DIR / "dataset"
 
     model = torch.jit.load(str(model_path), map_location=device).eval()
@@ -114,8 +114,9 @@ def main() -> None:
                             "M": params.virtual_mass_kg,
                             "budget_n": budget}
 
+    # 报告落在被评测模型自己的目录里，不要固定写 estimator/ —— 否则换模型评测会互相覆盖。
     out = Path(args.output) if args.output else (
-        spec.TRACTION_LOG_DIR / "estimator" / f"acceptance_{args.split}.json")
+        Path(model_path).parent / f"acceptance_{args.split}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
     print(f"\n[traction] 报告 → {out}")

@@ -316,6 +316,22 @@ for _term in PER_JOINT_TERMS:
 #: 数据集、模型、报告都落这里。`logs/` 在 .gitignore 里，不进版本库。
 TRACTION_LOG_DIR = rma_spec.LOG_DIR / "traction"
 
+#: 当前在用的力估计器。所有脚本的 `--estimator/--model` 默认值都从这里取，
+#: 换模型只改这一行。
+#:
+#: 为什么是 `estimator_residual` 而不是分数更好的 `estimator_dilated`：
+#: 两者结构完全相同（55,123 参数、空洞 [1,2,4,8]），只差 `CausalBlock` 的残差开关。
+#: **仿真分数把它们排反了** —— 2026-10-26 用 300 s 真机无外力行走录制实测：
+#:
+#:     模型                 仿真 xy RMSE   真机误报 p99   真机误报 max
+#:     estimator_dilated       4.535         38.70 N       49.91 N
+#:     estimator_residual      4.615         16.68 N       20.22 N
+#:
+#: 设计力范围上限是 30 N（`FORCE_DESIGN_RANGE_N`），dilated 的误报已经盖过整个
+#: 可用区间，没有任何死区能同时放过真牵引、挡住噪声；residual 才留得下 15–30 N。
+#: 选型**以真机为准**，仿真分数只用来筛掉明显不行的。
+DEFAULT_ESTIMATOR_DIR = TRACTION_LOG_DIR / "estimator_residual"
+
 
 def summary() -> str:
     """一行行列出契约，给 `check_traction_contract.py` 和日志用。"""

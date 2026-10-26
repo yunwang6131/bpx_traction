@@ -41,7 +41,7 @@ parser = argparse.ArgumentParser(description="牵引闭环测试")
 parser.add_argument("--policy", type=str,
                     default="logs/rsl_rl/bpx_pro_sprint4/2026-10-21_11-02-37_student")
 parser.add_argument("--estimator", type=str, default=None,
-                    help="TorchScript，默认 logs/traction/estimator/estimator.ts")
+                    help="TorchScript，默认 spec.DEFAULT_ESTIMATOR_DIR/estimator.ts")
 parser.add_argument("--task", type=str, default="Isaac-Velocity-Flat-BpxPro-v0")
 parser.add_argument("--agent", type=str, default="rsl_rl_distillation_cfg_entry_point")
 parser.add_argument("--checkpoint", type=str, default="model_.*.pt")
@@ -123,7 +123,7 @@ class ClosedLoop:
         self.estimator = None
         if not args_cli.oracle_force:
             path = Path(args_cli.estimator) if args_cli.estimator else (
-                spec.TRACTION_LOG_DIR / "estimator" / "estimator.ts")
+                spec.DEFAULT_ESTIMATOR_DIR / "estimator.ts")
             self.estimator = torch.jit.load(str(path), map_location=self.device).eval()
             print(f"[traction] 估计器 {path}")
         else:

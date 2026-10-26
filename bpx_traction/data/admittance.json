@@ -1,8 +1,8 @@
 {
   "virtual_mass_kg": 3.2,
-  "virtual_damping_ns_per_m": 17.77777777777778,
-  "deadzone_on_n": 8.0,
-  "deadzone_off_n": 6.0,
+  "virtual_damping_ns_per_m": 13.333333333333334,
+  "deadzone_on_n": 15.0,
+  "deadzone_off_n": 12.0,
   "engage_hold_s": 0.2,
   "release_hold_s": 0.0,
   "min_speed_mps": 0.15,
@@ -19,5 +19,5 @@
     0.5
   ],
   "source_task": "Isaac-Velocity-Flat-BpxPro-v0",
-  "calibrated": false
+  "calibrated": true
 }

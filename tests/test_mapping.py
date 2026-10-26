@@ -193,7 +193,13 @@ def test_direction_preserved_when_unsaturated():
     """各向同性增益：45° 斜拉，输出方向也该是 45°（前提是 vy 没饱和）。"""
     p = AdmittanceParams(max_accel_mps2=1e6)
     m = AdmittanceMapping(p)
-    magnitude = 12.0                                  # 小到 vy 不会撞 0.5 的上限
+    # 力要落在"过得了死区"和"vy 还没撞上限"之间。两头都是标定出来的数，
+    # 所以从参数算，不要写死 —— 死区一重标，写死的幻数会悄悄掉到死区下面去。
+    lo = p.deadzone_on_n
+    hi = p.deadzone_off_n + (p.vy_range[1] * math.sqrt(2.0) - p.min_speed_mps) \
+        * p.virtual_damping_ns_per_m
+    assert lo < hi, f"死区({lo}) 和 vy 饱和({hi:.1f}) 之间没有可用区间了"
+    magnitude = (lo + hi) / 2.0
     f = magnitude / math.sqrt(2.0)
     cmd = run(m, (f, f), steps=int(20 * p.tau_s() / DT))
     angle = math.degrees(math.atan2(cmd[-1, 1], cmd[-1, 0]))
