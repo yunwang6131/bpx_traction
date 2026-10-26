@@ -33,6 +33,7 @@ parser.add_argument("--steps", type=int, default=1000)
 parser.add_argument("--vx", type=float, default=0.5)
 parser.add_argument("--vy", type=float, default=0.0)
 parser.add_argument("--wz", type=float, default=0.0)
+parser.add_argument("--side", action="store_true", help="正侧方视角 + 拉近，看步态细节用")
 parser.add_argument("--report", action="store_true", help="最后打一份指标汇总")
 parser.add_argument(
     "--random-cmd", dest="random_cmd", action="store_true",
@@ -96,8 +97,12 @@ def main() -> None:
         env_cfg.viewer.origin_type = "asset_root"
         env_cfg.viewer.asset_name = "robot"
         env_cfg.viewer.env_index = 0
-        env_cfg.viewer.eye = (2.2, 2.2, 1.0)      # origin_type 非 world 时，eye/lookat 是相对量
-        env_cfg.viewer.lookat = (0.0, 0.0, 0.2)
+        if args_cli.side:
+            env_cfg.viewer.eye = (0.0, 2.0, 0.45)   # 正侧方、拉近、略高于机身，看腿部步态
+            env_cfg.viewer.lookat = (0.0, 0.0, 0.25)
+        else:
+            env_cfg.viewer.eye = (2.2, 2.2, 1.0)      # origin_type 非 world 时，eye/lookat 是相对量
+            env_cfg.viewer.lookat = (0.0, 0.0, 0.2)
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     if args_cli.video:
@@ -150,6 +155,7 @@ def main() -> None:
                 cmd = base.command_manager.get_command("base_velocity")
                 stats["lin_err"].append((robot.data.root_lin_vel_b[:, :2] - cmd[:, :2]).norm(dim=-1))
                 stats["ang_err"].append((robot.data.root_ang_vel_b[:, 2] - cmd[:, 2]).abs())
+                stats.setdefault("vx_actual", []).append(robot.data.root_lin_vel_b[:, 0])  # 实际前向速度
                 stats["height"].append(robot.data.root_pos_w[:, 2])
                 stats["knee_tau"].append(robot.data.applied_torque[:, knee_ids].abs().mean(dim=-1))
                 foot_z.append(robot.data.body_pos_w[:, foot_ids, 2].clone())

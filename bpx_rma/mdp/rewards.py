@@ -7,15 +7,65 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import torch
 
-from isaaclab.assets import RigidObject
+from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
+
+from . import gait as _gait
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
+
+
+# ---------------------------------------------------------------------------
+# 速度门控的能量惩罚：低速全额（省能平稳），高速放松（让策略敢发力冲）
+# ---------------------------------------------------------------------------
+def _speed_gate(
+    env: ManagerBasedRLEnv, command_name: str, v_lo: float, v_hi: float, gate_min: float
+) -> torch.Tensor:
+    """(N,) 门控系数：|cmd_vx| ≤ v_lo → 1；≥ v_hi → gate_min；之间线性。
+
+    用**指令速度**而非实测速度（实测有噪声、且站桩时实测=0 会误判成低速反而重罚，
+    把站桩锁死）。指令是策略当前被要求的速度，高指令时就该放松，鼓励它去冲。
+    """
+    v = env.command_manager.get_command(command_name)[:, 0].abs()
+    frac = ((v - v_lo) / max(v_hi - v_lo, 1e-6)).clamp(0.0, 1.0)
+    return 1.0 - (1.0 - gate_min) * frac
+
+
+def joint_torques_l2_gated(
+    env: ManagerBasedRLEnv, command_name: str = "base_velocity",
+    v_lo: float = 2.0, v_hi: float = 4.5, gate_min: float = 0.1,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Σ τ²，乘速度门控。高速时放松，让策略敢用大力矩推进。"""
+    asset: Articulation = env.scene[asset_cfg.name]
+    base = torch.sum(torch.square(asset.data.applied_torque), dim=1)
+    return base * _speed_gate(env, command_name, v_lo, v_hi, gate_min)
+
+
+def joint_acc_l2_gated(
+    env: ManagerBasedRLEnv, command_name: str = "base_velocity",
+    v_lo: float = 2.0, v_hi: float = 4.5, gate_min: float = 0.1,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Σ q̈²，乘速度门控。高速时放松，让策略敢爆发式蹬腿。"""
+    asset: Articulation = env.scene[asset_cfg.name]
+    base = torch.sum(torch.square(asset.data.joint_acc), dim=1)
+    return base * _speed_gate(env, command_name, v_lo, v_hi, gate_min)
+
+
+def action_rate_l2_gated(
+    env: ManagerBasedRLEnv, command_name: str = "base_velocity",
+    v_lo: float = 2.0, v_hi: float = 4.5, gate_min: float = 0.2,
+) -> torch.Tensor:
+    """Σ(a_t − a_{t−1})²，乘速度门控。高速时放松，让动作可以变快。"""
+    base = torch.sum(torch.square(env.action_manager.action - env.action_manager.prev_action), dim=1)
+    return base * _speed_gate(env, command_name, v_lo, v_hi, gate_min)
 
 
 def foot_clearance_penalty(
@@ -72,3 +122,26 @@ def foot_clearance_deficit(
     deficit = (target_height - asset.data.body_pos_w[:, asset_cfg.body_ids, 2]).clamp(min=0.0)
     foot_velocity_tanh = torch.tanh(tanh_mult * torch.norm(asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :2], dim=2))
     return torch.sum(deficit * foot_velocity_tanh, dim=1)
+
+
+def feet_gait(
+    env: ManagerBasedRLEnv,
+    period: float,
+    duty: float,
+    offset: Sequence[float] = _gait.TROT_OFFSET,
+    contact_height: float = 0.045,
+    command_name: str = "base_velocity",
+    command_threshold: float = 0.1,
+) -> torch.Tensor:
+    """接触-相位匹配（权重取正）：支撑相该触地、摆动相该离地，匹配比例。
+
+    is_stance = leg_phase < duty；is_contact = 脚高 < contact_height（平地触地约
+    0.0285）。四脚匹配比例 ∈ {0, 0.25, 0.5, 0.75, 1}，强制规律对角 trot。
+    用脚高判接触（和 play 口径一致），避免接触传感器 body 顺序对不齐。
+    """
+    foot_z = _gait.foot_z_world(env)
+    lp = _gait.leg_phase(env, period, offset)
+    is_stance = lp < duty
+    is_contact = foot_z < contact_height
+    reward = (is_stance == is_contact).float().mean(dim=1)
+    return reward * _gait.command_active(env, command_name, command_threshold)

@@ -127,7 +127,19 @@ def main() -> None:
     runner_cls = DistillationRunner if agent_cfg.class_name == "DistillationRunner" else OnPolicyRunner
     runner = runner_cls(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     if resume_path is not None:
-        runner.load(resume_path)
+        # 迁移种子（跨观测维度，如相位进观测 45→47）没有 optimizer_state_dict：
+        # 权重已按新维度扩好，只需加载 actor/critic，optimizer/iteration 从头重建。
+        import torch as _torch
+
+        _ck = _torch.load(resume_path, weights_only=False, map_location="cpu")
+        _migrated = "optimizer_state_dict" not in _ck
+        del _ck
+        if _migrated:
+            print("[bpx] 迁移种子：跳过 optimizer/iteration，从头重建")
+            runner.load(resume_path, load_cfg={"actor": True, "critic": True, "optimizer": False,
+                                               "iteration": False, "rnd": False}, strict=False)
+        else:
+            runner.load(resume_path)
 
     os.makedirs(os.path.join(log_dir, "params"), exist_ok=True)
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)

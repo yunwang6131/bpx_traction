@@ -156,6 +156,26 @@ class HistoryFrameCfg(PolicyFrameCfg):
         self.flatten_history_dim = True
 
 
+# --- 相位进观测（Sprint6 用）：在 45 维末尾追加 [sinφ, cosφ]，前 45 维一字不动 ---
+# 板子将来复现时只需在帧末尾多算这 2 维时钟，前 45 维逻辑完全不变。周期按我们
+# 自己的步频 2.2Hz 定（GAIT_PERIOD=0.45），和 feet_gait 奖励同一个时钟。
+_PHASE_TERM = dict(func=mdp.gait_phase_obs, params={"period": 0.45, "command_name": "base_velocity"})
+
+
+@configclass
+class PhasePolicyFrameCfg(PolicyFrameCfg):
+    """45 维 + 相位 2 维 = 47 维。phase 作为第 7 项追加在末尾。"""
+
+    phase = ObsTerm(**_PHASE_TERM)
+
+
+@configclass
+class PhaseHistoryFrameCfg(HistoryFrameCfg):
+    """47 维 × 25 帧 = 1175 维。"""
+
+    phase = ObsTerm(**_PHASE_TERM)
+
+
 @configclass
 class PrivilegedCfg(ObsGroup):
     """只给 teacher。这些就是辨识产出的量——student 得从历史里把它们猜出来。"""
@@ -519,6 +539,210 @@ class BpxProFlatSprint4EnvCfg(BpxProFlatSprint3EnvCfg):
 @configclass
 class BpxProFlatSprint4EnvCfg_PLAY(BpxProFlatSprint4EnvCfg):
     """Sprint4 的回放 / 导出配置。"""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 50
+        self.episode_length_s = 40.0
+        self.observations.policy.enable_corruption = False
+        self.events.push_robot = None
+        self.events.base_com = None
+        self.commands.base_velocity.ranges.lin_vel_x = (3.0, 3.0)
+        self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+        self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+
+
+@configclass
+class BpxProFlatSprint5EnvCfg(BpxProFlatSprint4EnvCfg):
+    """Sprint 第五版：在 sprint4(rollfix) 上**只加一个最小相位奖励**，其它一概不动。
+
+    sprint4(rollfix) 的全部保留——横滚修复 flat_roll、抬脚 deficit(7cm)、站立修复、
+    dq 滞后、髋 roll、高度 0.37、vx 4.0、倒车 -2.0，**一个都不换**。
+
+    唯一新增：`feet_gait`——支撑相该触地、摆动相该离地的接触-相位匹配比例(正奖励)，
+    让对角 trot 按一个节拍更规律地交替。相位是环境里的纯时间时钟，**只驱动这一个
+    奖励、不进 45 维观测**，板子契约零改动。参数按我们自己的步态定：
+
+      * 周期 T=0.45s ≈ 2.2Hz（我们实测步频 1.5→2.07 / 3.0→2.5 的中值，不是 Go2 的值）
+      * duty=0.65（我们实测占空比 ~0.65，不是 Go2 文档的 0.52/0.55）
+      * 权重 +0.5（温和引导，不强行改步态结构）
+
+    rollfix 的 trot 本来就 0.80/0.90 很规律，这一项是锦上添花式的节拍规整，不期望
+    大改，也不碰抬脚/横滚/速度。
+    """
+
+    GAIT_PERIOD = 0.45
+    GAIT_DUTY = 0.65
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.rewards.feet_gait = RewTerm(
+            func=mdp.feet_gait,
+            weight=0.5,
+            params={"period": self.GAIT_PERIOD, "duty": self.GAIT_DUTY},
+        )
+
+
+@configclass
+class BpxProFlatSprint5EnvCfg_PLAY(BpxProFlatSprint5EnvCfg):
+    """Sprint5 的回放 / 导出配置。"""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 50
+        self.episode_length_s = 40.0
+        self.observations.policy.enable_corruption = False
+        self.events.push_robot = None
+        self.events.base_com = None
+        self.commands.base_velocity.ranges.lin_vel_x = (3.0, 3.0)
+        self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+        self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+
+
+@configclass
+class BpxProFlatSprint6EnvCfg(BpxProFlatSprint5EnvCfg):
+    """Sprint 第六版：**相位进观测**（45→47）+ 极速拉到 5.0 + 横移 ±2.0。
+
+    在 sprint5(rollfix + feet_gait) 上加三件事，验证过的东西全保留、板子不碰：
+
+      * **相位进观测**：45 维末尾追加 [sinφ, cosφ] 两维（见 PhasePolicyFrameCfg）。
+        策略每步显式看到节拍——低速动作小、本体感觉弱时，这个显式节拍是走稳转稳
+        的关键（光靠 sprint5 的 feet_gait 奖励低速没改善，就是缺这个显式输入）。
+        前 45 维一字不动，板子将来只需末尾多算 2 维时钟。
+      * **极速 4.0 → 5.0**：lin_vel_x 上限拉到 5.0，让策略见过更高速。
+      * **横移 ±0.8 → ±2.0**：lin_vel_y 大幅加大。
+
+    注意这版**先不加能量门控**——先单独验证"相位进观测对低速的作用"和"拉到 5.0
+    自然能跑多快"。极速若上不去，下一版再加高速放松力矩/加速度惩罚的门控。
+
+    观测 47 维 ⇒ 导出 47 维 ONNX，**和现有 45 维板子契约不兼容**（check_contract
+    的 45 维断言对这版会失败，是预期的）；要上板得先把板子改成 47 维。
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        # 相位进观测：换成 47 维的观测组（前 45 维和 sprint5 完全一致，末尾加相位）
+        self.observations.policy = PhasePolicyFrameCfg()
+        self.observations.history = PhaseHistoryFrameCfg()
+        # 极速冲 5.0、横移 ±2.0；倒车保持 -2.0，转向保持 ±2.0
+        self.commands.base_velocity.ranges.lin_vel_x = (-2.0, 5.0)
+        self.commands.base_velocity.ranges.lin_vel_y = (-2.0, 2.0)
+
+
+@configclass
+class BpxProFlatSprint6EnvCfg_PLAY(BpxProFlatSprint6EnvCfg):
+    """Sprint6 的回放 / 导出配置。"""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 50
+        self.episode_length_s = 40.0
+        self.observations.policy.enable_corruption = False
+        self.events.push_robot = None
+        self.events.base_com = None
+        self.commands.base_velocity.ranges.lin_vel_x = (3.0, 3.0)
+        self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+        self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+
+
+@configclass
+class BpxProFlatSprint7EnvCfg(BpxProFlatSprint4EnvCfg):
+    """Sprint 第七版：**能量门控冲极速**。在 rollfix(sprint4) 上,45 维不变、板子不碰。
+
+    sprint6 验证了:相位进观测没带来低速改善、极速反而略慢。所以这版回到 rollfix
+    这个已验证的最好基底(45 维,抬脚/横滚/辨识全保留),只做一件事——**破极速的
+    "站桩天花板"**。
+
+    rollfix 极速卡在 ~3.8:指令超过能力时策略消极站桩,因为"拼命冲拿不到跟踪分、还
+    挨一堆力矩罚"不如"站着少挨罚"。根因是力矩/加速度/动作率惩罚**恒定**,高速时比
+    跟踪奖励还重,把"发力"算成了亏本。
+
+    **能量门控**:这三个惩罚的权重随指令速度放松(见 rewards._speed_gate)——
+      * |cmd_vx| ≤ 2.0:全额惩罚(低速省能平稳,不动 rollfix 的好处);
+      * |cmd_vx| ≥ 4.5:降到 10-20%(高速几乎不罚,让策略敢用大力矩、快动作去冲);
+      * 之间线性。
+    外加极速 4.0 → 5.0,让策略见过并去够更高速。
+
+    预期:低速和 rollfix 一样(门控低速=全额,等价),高速突破 3.8。代价是高速能耗、
+    姿态平稳度下降(放开了嘛),但那正是冲速度该付的。
+    """
+
+    GATE = {"v_lo": 2.0, "v_hi": 4.5}
+
+    def __post_init__(self):
+        super().__post_init__()
+        # 三个能量惩罚换成速度门控版（同权重，高速放松）
+        self.rewards.dof_torques_l2 = RewTerm(
+            func=mdp.joint_torques_l2_gated, weight=-2.0e-5,
+            params={**self.GATE, "gate_min": 0.1},
+        )
+        self.rewards.dof_acc_l2 = RewTerm(
+            func=mdp.joint_acc_l2_gated, weight=-2.5e-7,
+            params={**self.GATE, "gate_min": 0.1},
+        )
+        self.rewards.action_rate_l2 = RewTerm(
+            func=mdp.action_rate_l2_gated, weight=-0.05,
+            params={**self.GATE, "gate_min": 0.2},
+        )
+        # 极速拉到 5.0（横移保持 rollfix 的 ±0.8，不动，专注冲前向极速）
+        self.commands.base_velocity.ranges.lin_vel_x = (-2.0, 5.0)
+
+
+@configclass
+class BpxProFlatSprint8EnvCfg(BpxProFlatSprint7EnvCfg):
+    """Sprint 第八版：**极速强化**。在 sprint7 能量门控基础上把旋钮全调开,冲 5.0-5.5。
+
+    sprint7 的门控把极速从 3.8 推到 ~4.5。这版继续拧:高速残余惩罚更低、放松区
+    延伸更高、指令上限拉到 6.0,让策略在高速段几乎零惩罚、敢彻底发力。
+
+      * gate_min 0.1/0.2 → **0.03**(高速残余惩罚砍到 3%,几乎不罚)
+      * v_hi 4.5 → **5.5**(放松区延伸到 5.5,让 4.5-5.5 段也放开)
+      * 指令上限 5.0 → **6.0**(见过并去够更高速)
+
+    低速段(≤v_lo=2.0)门控仍是全额,和 rollfix/sprint7 一样,不动低速的好处。
+    物理天花板:电机 33 N·m 的功率上限,高速功率=力矩×转速,到某点电机饱和,
+    门控放再开也没用——所以目标 5.0-5.5,6.0 可能撞硬件墙。
+    """
+
+    GATE = {"v_lo": 2.0, "v_hi": 5.5}
+    GATE_MIN = 0.03
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.rewards.dof_torques_l2 = RewTerm(
+            func=mdp.joint_torques_l2_gated, weight=-2.0e-5,
+            params={**self.GATE, "gate_min": self.GATE_MIN},
+        )
+        self.rewards.dof_acc_l2 = RewTerm(
+            func=mdp.joint_acc_l2_gated, weight=-2.5e-7,
+            params={**self.GATE, "gate_min": self.GATE_MIN},
+        )
+        self.rewards.action_rate_l2 = RewTerm(
+            func=mdp.action_rate_l2_gated, weight=-0.05,
+            params={**self.GATE, "gate_min": self.GATE_MIN},
+        )
+        self.commands.base_velocity.ranges.lin_vel_x = (-2.0, 6.0)
+
+
+@configclass
+class BpxProFlatSprint8EnvCfg_PLAY(BpxProFlatSprint8EnvCfg):
+    """Sprint8 的回放 / 导出配置。"""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 50
+        self.episode_length_s = 40.0
+        self.observations.policy.enable_corruption = False
+        self.events.push_robot = None
+        self.events.base_com = None
+        self.commands.base_velocity.ranges.lin_vel_x = (3.0, 3.0)
+        self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+        self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+
+
+@configclass
+class BpxProFlatSprint7EnvCfg_PLAY(BpxProFlatSprint7EnvCfg):
+    """Sprint7 的回放 / 导出配置。"""
 
     def __post_init__(self):
         super().__post_init__()

@@ -9,10 +9,15 @@ IsaacLab 自带的 mdp 整个透出来，再覆盖上本项目特有的事件 / 
 from isaaclab_tasks.manager_based.locomotion.velocity.mdp import *  # noqa: F401, F403
 
 from .events import knee_load_friction, randomize_actuator_params, randomize_total_mass  # noqa: F401
+from .gait import gait_phase_obs  # noqa: F401
 from .rewards import (  # noqa: F401
+    action_rate_l2_gated,
+    feet_gait,
     flat_orientation_roll_l2,
     foot_clearance_deficit,
     foot_clearance_penalty,
+    joint_acc_l2_gated,
+    joint_torques_l2_gated,
 )
 from .observations import (  # noqa: F401
     actuator_armature_ratio,
