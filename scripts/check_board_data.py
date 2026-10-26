@@ -155,6 +155,52 @@ def report_torque(data, idx, standing: bool) -> list[str]:
     return lines
 
 
+def report_external_response(data, idx) -> list[str]:
+    """力矩对外力有没有响应 —— **这是整条路成立与否的前提**。
+
+    没有力传感器，外力只能从本体感知反推。如果关节力矩对"有人推它"毫无反应，
+    那 61 维输入里就没有外力信号，力估计器无从学起。
+
+    判别办法：|τ| 的滑动标准差。安静站立时它反映的是控制噪声；被推时反映的是外力。
+    两者的比值就是信噪比。
+    """
+    names = [f"{leg}_{jt}" for leg in ("fl", "fr", "hl", "hr")
+             for jt in ("roll", "pitch", "knee")]
+    keys = [f"tau_{n}" for n in names]
+    if not all(k in idx for k in keys) or "mode" not in idx:
+        return []
+    tau = data[:, [idx[k] for k in keys]]
+    mode = data[:, idx["mode"]]
+    live = (mode == 3) | (mode == 4)            # JOINT / POLICY 才有控制
+    if live.sum() < 1000:
+        return ["外力响应   JOINT/POLICY 段太短，测不了"]
+
+    magnitude = np.linalg.norm(tau, axis=1)
+    window = int(0.5 * rma_spec.JOINT_HZ)
+    stride = 50
+    rolling = np.array([magnitude[max(0, k - window):k + window].std()
+                        for k in range(0, len(magnitude), stride)])
+    live_roll = rolling[live[::stride][:len(rolling)]]
+    if len(live_roll) < 10:
+        return []
+    quiet = float(np.percentile(live_roll, 25))
+    peak = float(rolling.max())
+    ratio = peak / max(quiet, 1e-9)
+
+    lines = [
+        f"外力响应   |τ| 滑动std  安静 {quiet:.3f}   峰值 {peak:.2f} N·m   "
+        f"信噪比 {ratio:.0f}×",
+    ]
+    if ratio > 20:
+        lines.append("           ✓ 外力在关节力矩上**强可观测** —— 力估计器有东西可学")
+    elif ratio > 5:
+        lines.append("           ⚠️ 响应偏弱，估计器能学但精度有限")
+    else:
+        lines.append("           ✗ 力矩对外力基本没反应 —— 61 维输入里没有外力信号，"
+                     "整条路要重新设计输入")
+    return lines
+
+
 def report_body_force(data, idx) -> list[str]:
     """走路时的机身力波动 —— 死区的依据。
 
@@ -211,6 +257,7 @@ def main() -> None:
         for block in (report_timing(data, idx), report_accel(data, idx),
                       report_quaternion(data, idx),
                       report_torque(data, idx, standing),
+                      report_external_response(data, idx),
                       report_body_force(data, idx)):
             for line in block:
                 print("  " + line)
