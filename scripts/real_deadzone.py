@@ -25,7 +25,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bpx_traction import spec  # noqa: E402
-from bpx_traction.model import ForceTCN  # noqa: E402
+from bpx_traction.model import from_checkpoint  # noqa: E402
 
 JOINTS = [f"{leg}_{j}" for leg in ("fl", "fr", "hl", "hr") for j in ("roll", "pitch", "knee")]
 #: 45 维策略观测里各段的位置，顺序来自 deploy.yaml 的 observations 段。
@@ -104,10 +104,7 @@ def main() -> None:
     print(f"[检查] 加速度模长均值 {acc_norm:.2f} m/s² ✓ 含重力")
 
     ck = torch.load(estimator / "estimator.pt", map_location="cpu", weights_only=False)
-    model = ForceTCN(input_dim=ck["input_dim"], channels=ck["channels"],
-                     blocks=ck["blocks"], dilations=tuple(ck["dilations"]))
-    model.load_state_dict(ck["model"])
-    model.eval()
+    model = from_checkpoint(ck)
     nz = np.load(estimator / "normalization.npz")
     mean, std = nz["mean"].astype(np.float32), nz["std"].astype(np.float32)
     print(f"[模型] {estimator.name}  仿真验证集 xy RMSE {ck['score_xy_rmse_n']:.3f} N")

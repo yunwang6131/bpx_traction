@@ -159,6 +159,26 @@ class ForceTCN(nn.Module):
         return values, confidence
 
 
+def from_checkpoint(ck: dict) -> "ForceTCN":
+    """按检查点里记的结构造网络并装权重。
+
+    **不要手搓 `ForceTCN(...)` 再 `load_state_dict`。** 残差连接不引入任何参数，
+    `state_dict` 的键和形状完全一样，所以漏传 `residual` 时权重会**静默**装进一个
+    结构不同的网络 —— 不报错，只是算出来的东西不对。空洞率同理（`dilations=None`
+    会被解释成全 1）。2026-10-26 就是这么把一次真机选型搞反的。
+    """
+    model = ForceTCN(
+        input_dim=ck["input_dim"],
+        channels=ck["channels"],
+        blocks=ck["blocks"],
+        dilations=tuple(ck["dilations"]),
+        residual=bool(ck.get("residual", False)),
+    )
+    model.load_state_dict(ck["model"])
+    model.eval()
+    return model
+
+
 class NormalizedForceTCN(nn.Module):
     """把 (x − mean) / std 焊进图里，导出 TorchScript / ONNX 用这个。
 

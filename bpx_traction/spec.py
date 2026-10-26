@@ -24,7 +24,20 @@ PROJECT_DIR = PACKAGE_DIR.parent                       # .../bpx
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
-from bpx_rma import spec as rma_spec  # noqa: E402
+try:
+    from bpx_rma import spec as rma_spec  # noqa: E402
+except ImportError:
+    # 板子上没有 gymnasium，而 `bpx_rma/__init__.py` 第一行就 import 它。
+    # `bpx_rma/spec.py` 本身是纯 Python（只用 os / pathlib），绕开包的 __init__
+    # 直接按文件加载 —— 这样板端和开发机读的是同一份契约，不会出现两套常数。
+    import importlib.util as _ilu
+
+    _p = PROJECT_DIR / "bpx_rma" / "spec.py"
+    if not _p.is_file():
+        raise
+    _s = _ilu.spec_from_file_location("bpx_rma_spec_standalone", _p)
+    rma_spec = _ilu.module_from_spec(_s)
+    _s.loader.exec_module(rma_spec)
 
 REFERENCE_DIR = PACKAGE_DIR / "reference"
 
@@ -319,18 +332,16 @@ TRACTION_LOG_DIR = rma_spec.LOG_DIR / "traction"
 #: 当前在用的力估计器。所有脚本的 `--estimator/--model` 默认值都从这里取，
 #: 换模型只改这一行。
 #:
-#: 为什么是 `estimator_residual` 而不是分数更好的 `estimator_dilated`：
-#: 两者结构完全相同（55,123 参数、空洞 [1,2,4,8]），只差 `CausalBlock` 的残差开关。
-#: **仿真分数把它们排反了** —— 2026-10-26 用 300 s 真机无外力行走录制实测：
+#: 2026-10-26 用 300 s 真机无外力行走录制比过两个候选（`scripts/real_deadzone.py`）：
 #:
-#:     模型                 仿真 xy RMSE   真机误报 p99   真机误报 max
-#:     estimator_dilated       4.535         38.70 N       49.91 N
-#:     estimator_residual      4.615         16.68 N       20.22 N
+#:     模型                 仿真 xy RMSE   真机误报 p99    max
+#:     estimator_dilated       4.535        38.70 N     49.91 N
+#:     estimator_residual      4.615        45.59 N     53.50 N
 #:
-#: 设计力范围上限是 30 N（`FORCE_DESIGN_RANGE_N`），dilated 的误报已经盖过整个
-#: 可用区间，没有任何死区能同时放过真牵引、挡住噪声；residual 才留得下 15–30 N。
-#: 选型**以真机为准**，仿真分数只用来筛掉明显不行的。
-DEFAULT_ESTIMATOR_DIR = TRACTION_LOG_DIR / "estimator_residual"
+#: dilated 两边都略好，所以留它。**但两个都还不能上真机** —— 设计力范围上限
+#: 30 N（`FORCE_DESIGN_RANGE_N`），误报已经盖过整个可用区间，定不出死区。
+#: 详见 `mapping.py` 里 `deadzone_on_n` 的注释。
+DEFAULT_ESTIMATOR_DIR = TRACTION_LOG_DIR / "estimator_dilated"
 
 
 def summary() -> str:

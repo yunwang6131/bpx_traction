@@ -220,9 +220,12 @@ def check_mapping_params(report: Report) -> None:
 
     if not params.calibrated:
         report.warn(
-            "死区待实测",
+            "死区仍是占位值（真机量过，现有估计器定不出来）",
             f"进 {params.deadzone_on_n:.1f} N / 出 {params.deadzone_off_n:.1f} N 是占位值。\n"
-            "BPX 自己的死区取决于走路时机身受力的周期波动有多大 —— 采完第一批数据再定。",
+            "2026-10-26 真机 300 s 无外力行走实测：误报力 p99 39–46 N、max 50–54 N，\n"
+            f"而设计力范围上限只有 {spec.FORCE_DESIGN_RANGE_N[1]:.0f} N —— 没有阈值能同时\n"
+            "放过真牵引、挡住噪声。先把估计器的 sim2real 做掉。\n"
+            "`calibrated=False` 会让 TractionRuntime.preflight() 拒绝启用牵引。",
         )
 
     if params.min_speed_mps <= params.stand_threshold_mps:
