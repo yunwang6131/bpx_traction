@@ -209,3 +209,60 @@ def sample_balanced_batch(
         choice = torch.randint(len(pool), (count,), generator=generator)
         picks.append(pool[choice])
     return torch.cat(picks)[:batch_size]
+
+
+# ---------------------------------------------------------------------------
+# 真机锚定：用无外力录制做域适配
+# ---------------------------------------------------------------------------
+@dataclass
+class RealAnchorWeights:
+    """真机那部分损失的权重。
+
+    真机上没有力传感器，但无外力录制里有两个免费标签：**力恒为 0**（采集时没人碰
+    机器人），以及**机身速度 ≈ 指令低通后的值**（策略稳态跟踪误差 0.053 m/s）。
+    """
+
+    #: 力 → 0。直接打误报，但只有这一项的话网络会退化成"永远输出零"
+    #: （真·退化样本：把残差权重装错结构的那个模型仿真 19.25 N，真机看着"误报低"
+    #: 其实是完全不响应）。所以仿真批次的力监督必须同时在，权重别压过它。
+    force_zero: float = 1.0
+    #: 速度 → 低通指令。**这一项才是对因的** —— 真机误报力的慢漂移和
+    #: "估计速度 − 指令速度"相关系数 +0.759，是所有候选里最强的；而速度头在真机上
+    #: 低估 61%。力头吃的是速度头的残差，把速度头掰正，残差才会小。
+    velocity: float = 2.0
+
+
+def real_anchor_loss(
+    values: torch.Tensor,
+    vel_label: torch.Tensor,
+    vel_weight: torch.Tensor,
+    weights: LossWeights | None = None,
+    anchor: RealAnchorWeights | None = None,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """真机批次的损失。`values` (B,15)、`vel_label` (B,3)、`vel_weight` (B,3)。
+
+    `vel_weight` 为 0 的分量不参与（vz 没有标签；瞬态帧权重打折）。
+    """
+    w = weights or LossWeights()
+    a = anchor or RealAnchorWeights()
+    sl = _slices()
+
+    # 力：真值就是零，所以不用 force_losses（它的方向项在零力上没有定义）。
+    # 尺度和仿真那边一致，除以 force_norm_n，否则两边的梯度量级对不上。
+    pred_force = values[:, sl["force_b"]]
+    axis_weight = torch.tensor(
+        [w.force_xy, w.force_xy, w.force_z],
+        device=pred_force.device, dtype=pred_force.dtype,
+    )
+    per_axis = nn.functional.smooth_l1_loss(
+        pred_force / w.force_norm_n, torch.zeros_like(pred_force), reduction="none"
+    )
+    force_zero = ((per_axis * axis_weight).sum(dim=1) / axis_weight.sum()).mean()
+
+    pred_vel = values[:, sl["base_lin_vel_b"]]
+    per_vel = nn.functional.smooth_l1_loss(pred_vel, vel_label, reduction="none")
+    denom = vel_weight.sum().clamp(min=1.0)
+    velocity = (per_vel * vel_weight).sum() / denom
+
+    total = a.force_zero * force_zero + a.velocity * velocity
+    return total, {"real_force_zero": float(force_zero), "real_velocity": float(velocity)}

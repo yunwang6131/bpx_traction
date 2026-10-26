@@ -332,16 +332,22 @@ TRACTION_LOG_DIR = rma_spec.LOG_DIR / "traction"
 #: 当前在用的力估计器。所有脚本的 `--estimator/--model` 默认值都从这里取，
 #: 换模型只改这一行。
 #:
-#: 2026-10-26 用 300 s 真机无外力行走录制比过两个候选（`scripts/real_deadzone.py`）：
+#: `estimator_real_ft` = `estimator_dilated` 用真机无外力录制做过域适配
+#: （`scripts/finetune_real.py`：仿真批次全监督 + 真机批次 力→0 / 速度→低通指令）。
 #:
-#:     模型                 仿真 xy RMSE   真机误报 p99    max
-#:     estimator_dilated       4.535        38.70 N     49.91 N
-#:     estimator_residual      4.615        45.59 N     53.50 N
+#:     模型                      仿真 xy RMSE   仿真高力段   真机误报 p99
+#:     estimator_dilated            4.535        7.452       48.00 N
+#:     estimator_residual           4.615          —         更差，见 git log
+#:     estimator_real_ft            4.631        7.829       35.55 N  <- 留出法实测
 #:
-#: dilated 两边都略好，所以留它。**但两个都还不能上真机** —— 设计力范围上限
-#: 30 N（`FORCE_DESIGN_RANGE_N`），误报已经盖过整个可用区间，定不出死区。
-#: 详见 `mapping.py` 里 `deadzone_on_n` 的注释。
-DEFAULT_ESTIMATOR_DIR = TRACTION_LOG_DIR / "estimator_dilated"
+#: 真机那一列是**时间留出法**量的（前 70% 训、后 30% 只评估，产物是
+#: `estimator_real_ft_holdout`）。同一份数据不做留出会报 18.96 N —— 偏乐观一倍，
+#: 别拿那个数做判断。仿真高力段只涨 5%，说明没退化成"永远输出零"。
+#:
+#: **仍然不能上真机**：留出法下要零误起步得把死区放到 30 N，正好等于设计范围上限
+#: （`FORCE_DESIGN_RANGE_N`），可用区间是零。瓶颈是真机数据量 —— 样本外指标在
+#: epoch 32 就平了，继续训没用。详见 `mapping.py` 的 `deadzone_on_n`。
+DEFAULT_ESTIMATOR_DIR = TRACTION_LOG_DIR / "estimator_real_ft"
 
 
 def summary() -> str:

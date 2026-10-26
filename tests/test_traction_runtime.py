@@ -251,26 +251,35 @@ def test_yaw_always_comes_from_the_stick():
 REAL = spec.TRACTION_LOG_DIR.parent / "real_v6" / "rec_20260418_191052"
 
 
-#: 真机无外力录制上，整条链路（估计器 → 导纳）当前的误起步占比。
+#: 真机无外力录制上，整条链路（估计器 → 导纳）当前的**误起步次数**和峰值速度。
 #:
-#: **这是已知缺陷的记录，不是规格。** 那段录制全程没人碰机器人，正确答案是
-#: 全程零指令；现有估计器误报 p99 39–46 N，而设计力范围上限只有 30 N，
-#: 所以不存在能挡住它的死区（见 `mapping.py` 的 `deadzone_on_n` 注释）。
+#: 数的是 Schmitt 的 `engaged` 翻转次数，不是"输出非零的帧占比" —— 后者几乎恒等于
+#: 100%，因为一阶导纳的输出是指数衰减，松开之后永远不会精确归零，尾巴会被算进去。
 #:
-#: 这条测试是**棘轮**：估计器改好之后把这两个数往下收，别让它悄悄退化回来。
-#: 目标是 0。
-REAL_FALSE_ENGAGE_PCT = 96.0
-REAL_FALSE_PEAK_MPS = 1.3
+#: **这是已知缺陷的记录，不是规格。** 那段录制全程没人碰机器人，正确答案是零起步。
+#: 2026-10-26 时间留出法实测：误报 p99 35.55 N，而设计力范围上限只有 30 N，
+#: 所以还是定不出可用死区（见 `mapping.py` 的 `deadzone_on_n`）。
+#:
+#: 这条是**棘轮**：估计器改好之后把这几个数往下收，别让它悄悄退化回来。目标是 0。
+#: 注意这里用的是出厂默认死区（占位值 8/6 N），所以次数比 `real_deadzone.py` 在
+#: 20–30 N 阈值下报的要多得多 —— 两边问的不是同一个问题。
+#: 2026-10-26 实测：298 s 里误起步 40 次、峰值 0.714 m/s（默认模型 estimator_real_ft）。
+#: 阈值留 10% 余量，免得换个 onnxruntime 版本就红。
+REAL_FALSE_ENGAGE_EVENTS = 44
+REAL_FALSE_PEAK_MPS = 0.80
 
 
 @pytest.mark.skipif(not ONNX.is_file() or not (REAL.parent / (REAL.name + "_joint500.bin")).is_file(),
                     reason="没有真机录制或估计器")
 def test_real_recording_false_engagement_does_not_regress():
-    """把真机 300 s 无外力行走逐帧喂进整条链路，量误起步率。
+    """把真机 300 s 无外力行走逐帧喂进整条链路，数误起步。
 
     和 `real_deadzone.py` 的区别：那边只看力的分布，这边跑的是**真正会上板的
     代码路径** —— 环形缓冲、ONNX 会话、Schmitt 迟滞、去抖、一阶导纳、速率限幅
     全在里面。链路里任何一环改坏了，这里会红。
+
+    ⚠ 当前默认模型 `estimator_real_ft` 就是用这段录制微调的，所以这条是**样本内**的，
+    偏乐观。诚实的数来自 `estimator_real_ft_holdout`（前 70% 训、后 30% 评）。
     """
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
     from real_deadzone import build_frames
@@ -280,20 +289,21 @@ def test_real_recording_false_engagement_does_not_regress():
     rt.enabled = True                       # 直接喂帧，跳过 preflight 的快照组装
     rt.mapping.reset()
 
-    engaged, total, peak = 0, 0, 0.0
+    events, total, peak, was = 0, 0, 0.0, False
     for k in range(spec.HISTORY_LENGTH, len(frames)):
         if not usable[k - spec.HISTORY_LENGTH + 1:k + 1].all():
             rt.ring.filled = False          # 跨过策略重启断点，历史重新灌
             continue
         force, conf = rt._infer(rt.ring.push(frames[k]))
-        speed = float(np.linalg.norm(rt.mapping.step(force, conf)[:2]))
-        peak = max(peak, speed)
-        engaged += speed > 0.0
+        peak = max(peak, float(np.linalg.norm(rt.mapping.step(force, conf)[:2])))
+        now = rt.mapping.state.engaged
+        events += now and not was
+        was = now
         total += 1
 
-    pct = 100.0 * engaged / max(1, total)
-    print(f"\n真机无外力录制：误起步 {pct:.2f}%（{engaged}/{total}），峰值 {peak:.3f} m/s")
-    assert pct <= REAL_FALSE_ENGAGE_PCT, (
-        f"误起步率 {pct:.2f}% 比记录的 {REAL_FALSE_ENGAGE_PCT}% 还差，整条链路退化了")
+    print(f"\n真机无外力录制 {total/spec.POLICY_HZ:.0f} s："
+          f"误起步 {events} 次，峰值 {peak:.3f} m/s")
+    assert events <= REAL_FALSE_ENGAGE_EVENTS, (
+        f"误起步 {events} 次，比记录的 {REAL_FALSE_ENGAGE_EVENTS} 次还多，整条链路退化了")
     assert peak <= REAL_FALSE_PEAK_MPS, (
         f"误起步峰值 {peak:.3f} m/s 比记录的 {REAL_FALSE_PEAK_MPS} 还高")
