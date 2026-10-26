@@ -23,3 +23,6 @@ deploy_pkg/
 
 # 本地工具配置
 .claude/
+
+# 对照用的第三方策略权重（ONNX 产物，同 deploy_pkg 不进历史）
+yu_policy_v5/
