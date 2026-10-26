@@ -107,10 +107,20 @@ assert obs_term_slices() == [(0, 12), (12, 24), (24, 27), (27, 30), (30, 42), (4
 #   （11.8 rad/s 时 21.3 -> 14.1 N·m）。低速段不受影响 —— 那里是 30 N·m 的部署限幅先生效。
 EFFORT_LIMIT = {"hip_roll": 33.0, "hip_pitch": 33.0, "knee": 33.0}
 
-# 速度：手册**没有**公布关节转速，这里仍沿用 URDF 的 limit 字段。
-# bpx_pro_sysid 的 motor_diag yaml 里那个 30 rad/s 是从 A3 缩放来的占位值，不可信。
-# 真值可以用 SDK 的 `getMaxVelocity()` 直接问机器人（手册 6.3），拿到后替换这里。
-VELOCITY_LIMIT = {"hip_roll": 22.0, "hip_pitch": 22.0, "knee": 15.0}
+# 速度：手册**没有**公布关节转速。
+#
+# ⚠️ 这里的 30 rad/s 是**待实测的假设值**（2026-10-25 按用户判断设定，计划下周用 SDK 的
+# `getMaxVelocity()` 实测确认，手册 6.3）。实测完把三项都换成真值，并重测极速。
+#
+# 换掉的旧值是 URDF 的 limit 字段 `{hip: 22, knee: 15}`。为什么它不可能对：DCMotor 的
+# 力矩-速度曲线在 `velocity_limit` 处可用力矩归零，而实测（logs/sim2sim/summary.json）
+# 峰值膝速 / 体速 ≈ 4.6 rad/s 每 m/s，照 15 算零力矩速度只有 3.3 m/s —— 可 sprint7
+# 实测跑到了 4.5。要么 URDF 的 15 偏小，要么 sprint7 的步态把这个比值压到 3.3 以下了
+# （两者可能都成立）。
+#
+# 三项一起抬，不是只抬膝：髋留在 22 的话零力矩速度 22/4.26 = 5.2 m/s，髋会先撞墙，
+# 6 m/s 照样无解。实测时三种关节类型都要问一遍，它们的减速比不一定相同。
+VELOCITY_LIMIT = {"hip_roll": 30.0, "hip_pitch": 30.0, "knee": 30.0}
 
 #: DCMotor 堵转力矩 = 力矩上限 × 该系数。参数 yaml 里也有同名项，
 #: 这里留一份给不读 yaml 的脚本（如 sim2sim 覆盖 FloorSim 的力矩包络）用。

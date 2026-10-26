@@ -95,6 +95,42 @@ PRESETS: dict[str, list[tuple[str, float, tuple[float, float, float]]]] = {
         ("指令 4.0",   6.0, (4.0, 0.0, 0.0)),
         ("指令 5.0",   6.0, (5.0, 0.0, 0.0)),
     ],
+    # 极速扫描（新电机包络用）：转速上限从 URDF 的 15/22 抬到 30 之后零力矩墙挪到
+    # 6.6 m/s，所以 topspeed 的 5.0 已经不够用，这组加到 6.5。段间不复位，逐级加速。
+    "topspeed6": [
+        ("站立",       4.0, (0.0, 0.0, 0.0)),
+        ("指令 2.0",   6.0, (2.0, 0.0, 0.0)),
+        ("指令 3.0",   6.0, (3.0, 0.0, 0.0)),
+        ("指令 3.5",   6.0, (3.5, 0.0, 0.0)),
+        ("指令 4.0",   6.0, (4.0, 0.0, 0.0)),
+        ("指令 4.5",   6.0, (4.5, 0.0, 0.0)),
+        ("指令 5.0",   6.0, (5.0, 0.0, 0.0)),
+        ("指令 5.5",   6.0, (5.5, 0.0, 0.0)),
+        ("指令 6.0",   6.0, (6.0, 0.0, 0.0)),
+        ("指令 6.5",   6.0, (6.5, 0.0, 0.0)),
+    ],
+    # 冷启动：从站立**直接**给大指令，复刻"手柄一把推到底"的场景。
+    # topspeed/topspeed6 是逐级加速、段间不复位，策略进每一段时已经在跑了，测不出这个。
+    # 站桩（高指令下策略选择不动）只在冷启动时暴露：奖励侧 exp 跟踪核在大误差处饱和，
+    # 从"站着"到"跑起来"这一路没有梯度。
+    "coldstart": [
+        ("站立 A",     4.0, (0.0, 0.0, 0.0)),
+        ("冷启 6.0",  12.0, (6.0, 0.0, 0.0)),
+        ("站立 B",     3.0, (0.0, 0.0, 0.0)),
+        ("冷启 4.0",  12.0, (4.0, 0.0, 0.0)),
+        ("站立 C",     3.0, (0.0, 0.0, 0.0)),
+        ("冷启 2.0",  12.0, (2.0, 0.0, 0.0)),
+    ],
+    # 冷启动阈值细扫：coldstart 测出 4.0 能起步、6.0 站桩，这组把分界夹出来。
+    # 用途：① 定手柄指令的安全上限（或斜坡率要覆盖到哪）；② 给 sprint9 做验收基线。
+    "coldstart_fine": [
+        ("站立 A",     4.0, (0.0, 0.0, 0.0)),
+        ("冷启 4.5",  12.0, (4.5, 0.0, 0.0)),
+        ("站立 B",     3.0, (0.0, 0.0, 0.0)),
+        ("冷启 5.0",  12.0, (5.0, 0.0, 0.0)),
+        ("站立 C",     3.0, (0.0, 0.0, 0.0)),
+        ("冷启 5.5",  12.0, (5.5, 0.0, 0.0)),
+    ],
     # 高速组专用（训练上限 3.0 m/s）。1.5 m/s 下两组打平，这组看更高速能不能分开。
     "straight_fast": [
         ("站立",        3.0, (0.0, 0.0, 0.0)),
@@ -212,7 +248,13 @@ def build_reference_sim(mj_floor, args):
     eff = np.array([spec.EFFORT_LIMIT[spec.joint_type(n)] for n in spec.JOINT_NAMES], float)
     sim.effort = eff
     sim.sat = eff * spec.SATURATION_FACTOR_FALLBACK
-    sim.vlim = np.array([spec.VELOCITY_LIMIT[spec.joint_type(n)] for n in spec.JOINT_NAMES], float)
+    vlim_by_type = dict(spec.VELOCITY_LIMIT)
+    if args.vlim:                                   # --vlim 22,15 = 髋 22 / 膝 15（覆盖 spec）
+        hip, knee = (float(v) for v in args.vlim.split(","))
+        vlim_by_type = {"hip_roll": hip, "hip_pitch": hip, "knee": knee}
+        print(f"[sim2sim] 转速上限覆盖为 髋 {hip} / 膝 {knee} rad/s（spec 里是 "
+              f"{spec.VELOCITY_LIMIT['hip_pitch']} / {spec.VELOCITY_LIMIT['knee']}）")
+    sim.vlim = np.array([vlim_by_type[spec.joint_type(n)] for n in spec.JOINT_NAMES], float)
     sim.vel_at_lim = sim.vlim * (1.0 + sim.effort / sim.sat)
 
     f0, mu = (float(v) for v in args.knee_fric.split(","))
@@ -292,6 +334,8 @@ def main() -> None:
                    help="参考模型的关节参数 yaml（默认用辨识结果——它是对真机最好的估计）")
     p.add_argument("--mass", type=float, default=15.1)
     p.add_argument("--knee-fric", default="1.0,0.26", help="膝负载摩擦 f0,mu")
+    p.add_argument("--vlim", default=None,
+                   help="覆盖关节转速上限 '髋,膝'（如 22,15 复刻 URDF 旧包络）；不给则用 spec")
     p.add_argument("--noise", type=float, nargs="*", default=[0.0],
                    help="观测噪声倍率，可给多个一次跑完（例：--noise 0 0.5 1.0 2.0）。"
                         "1.0 = IsaacLab 四足标准噪声：关节角 ±0.01rad、关节速度 ±1.5rad/s、"
