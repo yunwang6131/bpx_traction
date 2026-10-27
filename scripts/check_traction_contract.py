@@ -318,7 +318,7 @@ def check_model(report: Report) -> None:
     # 这里验的是 **padding 只补左边**，和归一化方式无关，所以固定用 norm="layer" 跑。
     # norm="group" 的统计量跨时间池化，整窗都会影响输出 —— 那不是 padding 的问题，
     # 部署时也仍然因果（窗口末端就是"现在"），见 model.py 的模块文档。
-    plain = ForceTCN(dilations=None, norm="layer").eval()
+    plain = ForceTCN(dilations=(1, 1, 1, 1), norm="layer").eval()
     outside = spec.HISTORY_LENGTH - plain.receptive_field()
     with torch.no_grad():
         base_v, base_c = plain(x)

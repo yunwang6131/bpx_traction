@@ -113,7 +113,7 @@ class ForceTCN(nn.Module):
         channels: int = 64,
         blocks: int = 4,
         kernel_size: int = 3,
-        dilations: "list[int] | tuple[int, ...] | None" = (1, 2, 4, 8),
+        dilations: "list[int] | tuple[int, ...]" = (1, 2, 4, 8),
         residual: bool = False,
         norm: str = "layer",
     ):
@@ -124,7 +124,9 @@ class ForceTCN(nn.Module):
         self.num_blocks = blocks
         self.residual = residual
         self.norm_kind = norm
-        #: 每个 TCN 块的空洞率。``None`` = 全 1（参考实现的做法，**已被实测否定**）。
+        #: 每个 TCN 块的空洞率。**必须显式给**，没有 ``None`` 回退 ——
+        #: 以前 ``None`` 悄悄表示"全 1"，结果一次残差消融因为漏传参数被静默改成
+        #: 非空洞版，整轮实验作废。要跑非空洞对照就写 ``(1, 1, 1, 1)``。
         #:
         #: **为什么要用空洞**：全 1 时感受野只有 ``1 + 4×(3−1) = 9`` 帧 = 180 ms，
         #: 而 BPX 的步态周期是 0.45 s = 22.5 帧（`bpx_rma` 的 `GAIT_PERIOD`）——
@@ -140,11 +142,15 @@ class ForceTCN(nn.Module):
         #: 所以默认就是 ``(1, 2, 4, 8)``。但注意**零力误报没有改善**
         #: （P95 5.11 → 5.06 N）—— 那一截误差不是感受野造成的，见
         #: `docs/traction_plan.md` 对零力误差下限的分析。
-        self.dilations = list(dilations) if dilations else [1] * blocks
+        if not dilations:
+            raise ValueError("dilations 必须显式给出，非空洞对照请写 (1, 1, 1, 1)")
+        self.dilations = [int(d) for d in dilations]
         if len(self.dilations) != blocks:
             raise ValueError(
                 f"给了 {len(self.dilations)} 个空洞率，但有 {blocks} 个块"
             )
+        if any(d < 1 for d in self.dilations):
+            raise ValueError(f"空洞率必须 ≥1，给的是 {self.dilations}")
 
         self.encoder = nn.Conv1d(input_dim, channels, kernel_size=1)
         self.tcn = nn.Sequential(
@@ -197,8 +203,9 @@ def from_checkpoint(ck: dict) -> "ForceTCN":
 
     **不要手搓 `ForceTCN(...)` 再 `load_state_dict`。** 残差连接不引入任何参数，
     `state_dict` 的键和形状完全一样，所以漏传 `residual` 时权重会**静默**装进一个
-    结构不同的网络 —— 不报错，只是算出来的东西不对。空洞率同理（`dilations=None`
-    会被解释成全 1）。2026-10-26 就是这么把一次真机选型搞反的。
+    结构不同的网络 —— 不报错，只是算出来的东西不对。2026-10-26 就是这么把一次
+    真机选型搞反的。（空洞率以前也有同样的坑，`None` 悄悄表示全 1，现在已经
+    改成必须显式给。）
 
     `norm` 不同则键名会变（LayerNorm 是 `norm.norm.*`，GroupNorm 是 `norm.*`），
     装错会直接报 missing/unexpected key —— 这一项不会静默失败，但还是记在检查点里。

@@ -72,7 +72,7 @@ def test_receptive_field_covers_a_gait_cycle(net):
 
 def test_dilation_is_free(net):
     """空洞不增加参数 —— 这是它比"加层/加宽"更划算的全部理由。"""
-    plain = ForceTCN(dilations=None)
+    plain = ForceTCN(dilations=(1, 1, 1, 1))
     assert count_parameters(plain) == count_parameters(net)
     assert plain.receptive_field() == 9, "全 1 空洞时应当退回 9 帧"
 
@@ -84,7 +84,7 @@ def test_frames_outside_receptive_field_do_not_matter():
     所以用全 1 空洞那版（感受野 9 帧）来验这条结构性质。
     """
     torch.manual_seed(1)
-    plain = ForceTCN(dilations=None).eval()
+    plain = ForceTCN(dilations=(1, 1, 1, 1)).eval()
     x = torch.randn(3, T, D)
     v0, c0 = plain(x)
 

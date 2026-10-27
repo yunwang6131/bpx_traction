@@ -36,6 +36,7 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 from bpx_traction import losses, metrics, spec  # noqa: E402
+from bpx_traction.augment import ImuAugment, apply_imu_augment  # noqa: E402
 from bpx_traction.mapping import AdmittanceParams  # noqa: E402
 from bpx_traction import model as model_mod  # noqa: E402
 from bpx_traction.model import (  # noqa: E402
@@ -82,7 +83,7 @@ def main() -> None:
     parser.add_argument("--blocks", type=int, default=4)
     parser.add_argument("--dilations", type=int, nargs="+", default=None,
                         help="每个 TCN 块的空洞率。不给=用模型默认的 1 2 4 8（感受野 620 ms）。"
-                             "给 1 1 1 1 退回参考实现的 180 ms，连半个步态周期都不到")
+                             "写 1 1 1 1 退回非空洞的 180 ms，连半个步态周期都不到")
     parser.add_argument("--norm", default="layer", choices=list(model_mod.NORMS),
                         help="归一化方式。group 的统计量跨时间池化，对窗口内的慢漂移"
                              "不敏感 —— 真机误报的主成分正是 0.3–0.9 Hz 慢漂移")
@@ -91,6 +92,10 @@ def main() -> None:
                              "最新帧只有一条通路，残差给它一条直通路")
     parser.add_argument("--patience", type=int, default=25,
                         help="验收指标多少轮没改善就停")
+    parser.add_argument("--imu-augment", dest="imu_augment", action="store_true",
+                        help="训练时随机缩放/低通加速度的 xy 两轴。仿真的 acc_xy 比真机"
+                             "大 6 倍（接触太硬 + 没有柔性），网络会把它当成尺度可信的量；"
+                             "真机上读数小 6 倍就被当成'没在动'。见 bpx_traction/augment.py")
     parser.add_argument("--no-balance", dest="no_balance", action="store_true",
                         help="不按力的大小配平批次（消融用）")
     parser.add_argument("--seed", type=int, default=0)
@@ -121,8 +126,6 @@ def main() -> None:
     print("[traction] 力桶：" + "  ".join(
         f"{name} {len(idx):,}" for name, idx in buckets.items()))
 
-    # 不给 --dilations 就用模型默认的 (1,2,4,8)。**不能**直接把 None 传进去 ——
-    # ForceTCN 把 None 解释成"全 1 空洞"（消融用），那会静默地把默认值覆盖掉。
     dilation_kwargs = {} if args.dilations is None else {"dilations": args.dilations}
     model = ForceTCN(channels=args.channels, blocks=args.blocks,
                      residual=args.residual, norm=args.norm, **dilation_kwargs).to(device)
@@ -136,6 +139,9 @@ def main() -> None:
                                   weight_decay=args.weight_decay)
     weights = losses.LossWeights()
     generator = torch.Generator().manual_seed(args.seed)
+    augment = ImuAugment(enabled=args.imu_augment)
+    gen_gpu = torch.Generator(device=device).manual_seed(args.seed)
+    print(f"[traction] IMU 增广：{augment.describe()}")
 
     admittance = AdmittanceParams.from_json() if (
         spec.PACKAGE_DIR / "data" / "admittance.json").exists() else AdmittanceParams()
@@ -157,7 +163,9 @@ def main() -> None:
                 idx = torch.randint(len(train_x), (args.batch_size,), generator=generator)
             else:
                 idx = losses.sample_balanced_batch(buckets, args.batch_size, generator)
-            x = ((train_x[idx].to(device) - mean) / std)
+            raw_x = train_x[idx].to(device)
+            raw_x = apply_imu_augment(raw_x, augment, gen_gpu)   # 增广在归一化之前
+            x = (raw_x - mean) / std
             y = train_y[idx].to(device)
 
             values, confidence = model(x)
@@ -246,6 +254,7 @@ def main() -> None:
         "gait_cycles_visible": round(model.gait_cycles_visible(), 3),
         "torchscript_parity_max_abs": parity,
         "balanced_batches": not args.no_balance,
+        "imu_augment": augment.describe(),
         "loss_weights": vars(weights),
         "elapsed_s": round(time.time() - started, 1),
         "epochs": history_log,
