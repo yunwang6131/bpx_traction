@@ -23,6 +23,10 @@ from pathlib import Path
 
 import numpy as np
 
+
+def _clip(x, lo, hi):
+    return lo if x < lo else hi if x > hi else x
+
 _PKG = Path(__file__).resolve().parents[1]           # .../bpx_traction
 if str(_PKG.parent) not in sys.path:
     sys.path.insert(0, str(_PKG.parent))
@@ -114,9 +118,13 @@ class TractionRuntime:
     """
 
     def __init__(self, onnx_path, projected_gravity, params=None,
-                 kp=40.0, kd=1.0, log=print):
+                 kp=40.0, kd=1.0, fusion='preempt', log=print):
         import onnxruntime as ort
 
+        if fusion not in ('preempt', 'add'):
+            raise ValueError("fusion 只能是 'preempt'（手柄一动牵引全让位，默认、最安全）"
+                             "或 'add'（牵引与手柄 xy 叠加，手感连续但误差也叠加）")
+        self.fusion = fusion
         self.log = log
         self.gravity = projected_gravity
         self.kp, self.kd = kp, kd
@@ -221,19 +229,28 @@ class TractionRuntime:
             self.bad_frames = 0
             history = self.ring.push(frame)
 
-            # 操作员在控：照样推进历史和映射状态（否则一松手映射是冷的），但不采纳输出。
+            # 历史和映射状态每步都推进（否则一松手映射是冷的）。
             force, conf = self._infer(history)
             self.last_force, self.last_conf = force, conf
             traction = self.mapping.step(force, conf)
+
+            # wz 永远来自手柄 —— 牵引只管 xy 平面，这条两种模式都成立。
+            if self.fusion == 'add':
+                # 叠加：牵引 xy + 手柄 xy，和夹到**训练分布**（不是板子限幅），
+                # 否则超出策略见过的范围会被策略端静默截断。死区已挡住低力误报，
+                # 所以静区内叠加的只有确信的 >deadzone 拉力。
+                vx = _clip(traction[0] + pad[0], *self.params.vx_range)
+                vy = _clip(traction[1] + pad[1], *self.params.vy_range)
+                return np.array([vx, vy, pad[2]], dtype=np.float32)
+            # preempt（默认）：手柄一动，牵引 xy 全让位。
             if float(np.abs(pad).max()) > STICK_ACTIVE:
                 return pad
-            # wz 永远来自手柄 —— 牵引只管 xy 平面。
             return np.array([traction[0], traction[1], pad[2]], dtype=np.float32)
         except Exception as exc:
             self.disable('运行异常 %r' % (exc,))
             return pad
 
     def status(self) -> str:
-        return '%s |F_xy| %5.1f N  conf %.2f' % (
-            '开' if self.enabled else '关',
+        return '%s[%s] |F_xy| %5.1f N  conf %.2f' % (
+            '开' if self.enabled else '关', self.fusion,
             float(np.linalg.norm(self.last_force[:2])), self.last_conf)

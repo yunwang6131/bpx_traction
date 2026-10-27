@@ -240,6 +240,37 @@ def test_stick_always_wins():
 
 
 @pytestmark_onnx
+def test_default_fusion_is_preempt():
+    """默认必须是抢占 —— 上板第一次用最安全的模式，不能手滑改成叠加。"""
+    rt = TractionRuntime(ONNX, gravity_xyzw, params=CALIBRATED)
+    assert rt.fusion == 'preempt'
+
+
+@pytestmark_onnx
+def test_additive_fusion_sums_and_clips():
+    """叠加模式：牵引 xy + 手柄 xy，和夹到训练范围；wz 仍只来自手柄。"""
+    rt = _force_enabled(TractionRuntime(ONNX, gravity_xyzw, params=CALIBRATED,
+                                        fusion='add'))
+    # 手柄推一个小前进，叠加时牵引会加在上面（而不是被让位）
+    pad = np.array([0.3, 0.0, 0.1], np.float32)
+    for _ in range(3 * spec.HISTORY_LENGTH):
+        out = rt.fuse(pad, snapshot(standing=False), np.zeros(12), policy_target=Q0)
+    assert out[2] == pad[2], "wz 两种模式都只来自手柄"
+    assert rt.params.vx_range[0] <= out[0] <= rt.params.vx_range[1], "和必须夹进训练范围"
+    assert rt.params.vy_range[0] <= out[1] <= rt.params.vy_range[1]
+    # 牵引确有非零输出时，叠加结果不等于单纯的手柄（证明确实叠加了）
+    if np.linalg.norm(rt.last_force[:2]) > rt.params.deadzone_on_n:
+        assert not np.allclose(out[:2], pad[:2]), "牵引在拉的时候，叠加必须改变 xy"
+
+
+@pytestmark_onnx
+def test_bad_fusion_mode_rejected():
+    import pytest
+    with pytest.raises(ValueError):
+        TractionRuntime(ONNX, gravity_xyzw, params=CALIBRATED, fusion='magic')
+
+
+@pytestmark_onnx
 def test_yaw_always_comes_from_the_stick():
     """牵引只管 xy 平面，wz 必须原样透传 —— 被侧拉时机器人保持朝向。"""
     rt = _force_enabled(TractionRuntime(ONNX, gravity_xyzw, params=CALIBRATED))
