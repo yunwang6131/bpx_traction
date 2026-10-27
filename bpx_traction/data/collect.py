@@ -15,6 +15,13 @@
 **`push_robot` 必须关。** 它是瞬时速度扰动，产生的本体响应和外力很像，
 但它**没有对应的力标签** —— 留着就等于往数据里掺"有响应、标签却是零力"的样本，
 直接教估计器低估。`prepare_for_traction()` 默认关掉它。
+
+**力标签滞后一步。** 环境是先积分、后出观测：第 t 帧的传感器里已经体现的是
+第 t−1 步施加的力，第 t 步的力要到 t+1 帧才可见。所以标签 =
+**上一步的世界系力转到当前机身系**（`R_tᵀ · F_w[t−1]`）。用当前步的力当标签
+等于要求网络预知 20 ms 的未来 —— 稳态无所谓，ramp/release 的瞬态段上就是
+一截消不掉的"超前误差"。这一条来自 Go2 原始代码 `train_causal_v3.py` 的
+环路顺序证明（见 force-aware-rma 分支），不是拟合出来的滞后。
 """
 
 from __future__ import annotations
@@ -23,6 +30,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import torch
+
+from isaaclab.utils.math import quat_apply_inverse
 
 from .. import spec
 from ..env.frame import FrameAssembler
@@ -201,13 +210,19 @@ class TractionCollector:
         hist_chunks, target_chunks, env_chunks = [], [], []
         kind_chunks, since_chunks = [], []
         offsets = self.tether.offsets_b.clone()
+        prev_force_w = torch.zeros(self.num_envs, 3, device=self.device)
 
         with torch.no_grad():
             for step in range(cfg.steps_per_round):
                 # 指令每步都写：command manager 会按 resampling_time_range 覆盖
                 self.base.command_manager.get_command("base_velocity")[:] = command
 
-                force_b = self.tether.apply_world(force_table[step])
+                self.tether.apply_world(force_table[step])
+                # 标签用上一步的力：观测 t 里体现的是 t-1 步已积分的力（见模块 docstring）
+                label_force_b = quat_apply_inverse(
+                    self.base.scene["robot"].data.root_quat_w,
+                    prev_force_w,
+                )
                 frame = self.frames.frame()
 
                 fresh = self.valid_steps == 0
@@ -225,11 +240,12 @@ class TractionCollector:
                 if step % cfg.stride == 0 and bool(ready.any()):
                     idx = torch.nonzero(ready).flatten()
                     hist_chunks.append(self.history[idx].clone().cpu())
-                    target_chunks.append(self.frames.labels(force_b)[idx].cpu())
+                    target_chunks.append(self.frames.labels(label_force_b)[idx].cpu())
                     env_chunks.append(idx.cpu())
                     kind_chunks.append(kind_of_env[idx].cpu())
                     since_chunks.append(since_change[idx].to(torch.int32).cpu())
 
+                prev_force_w = force_table[step]
                 action = policy(obs)
                 obs, _, dones, _ = self.env.step(action)
                 if bool(dones.any()):

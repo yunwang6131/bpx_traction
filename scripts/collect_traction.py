@@ -204,6 +204,7 @@ def main() -> None:
         },
         "targets": [{"name": n, "dim": d} for n, d in spec.OUTPUT_TERMS],
         "label_frame": spec.FORCE_FRAME,
+        "label_timing": "R_t^T · F_w[t-1]：上一步已积分的世界系力转到当前机身系（causal_v3 环路顺序证明）",
         "attach": {
             "randomized": not args_cli.fixed_attach,
             "body": spec.TETHER_BODY,
