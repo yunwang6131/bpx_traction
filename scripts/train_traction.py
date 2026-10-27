@@ -101,6 +101,14 @@ def main() -> None:
                              "真机上读数小 6 倍就被当成'没在动'。见 bpx_traction/augment.py")
     parser.add_argument("--no-balance", dest="no_balance", action="store_true",
                         help="不按力的大小配平批次（消融用）")
+    parser.add_argument("--transient-frac", dest="transient_frac", type=float, default=0.0,
+                        help="每批抽这么大比例的瞬态窗样本（力变化后 1 s 内，按 since_change 列选）。"
+                             "Go2 的 aligned_window 臂用 64/512=12.5%%。零力误报的大头在松绳后的"
+                             "衰减尾巴上，按幅值配平照顾不到这个相位")
+    parser.add_argument("--guarded-select", dest="guarded_select", action="store_true",
+                        help="选型分 = xy_RMSE × (1 + max(0, 零力FP_p95/2 − 1))：零力误报超过"
+                             "2 N 验收线就按超出比例罚。防止'总体赢、零力段退'——a1 那轮"
+                             "就是这么回事。默认关，保持和历史可比")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
@@ -128,6 +136,17 @@ def main() -> None:
     buckets = losses.bucket_indices(train_y)
     print("[traction] 力桶：" + "  ".join(
         f"{name} {len(idx):,}" for name, idx in buckets.items()))
+
+    transient_pool = None
+    if args.transient_frac > 0:
+        if "since_change" not in train:
+            raise SystemExit("--transient-frac 需要数据集带 since_change 列（新采的才有）")
+        pool = np.nonzero(train["since_change"] <= int(1.0 / spec.SAMPLE_PERIOD_S))[0]
+        if len(pool) == 0:
+            raise SystemExit("since_change ≤ 1 s 的样本是空的 —— 数据有问题")
+        transient_pool = torch.from_numpy(pool.astype("int64"))
+        print(f"[traction] 瞬态窗池 {len(pool):,}（力变化后 1 s 内），"
+              f"每批掺 {args.transient_frac:.0%}")
 
     dilation_kwargs = {} if args.dilations is None else {"dilations": args.dilations}
     model = ForceTCN(channels=args.channels, blocks=args.blocks,
@@ -157,7 +176,7 @@ def main() -> None:
           f"（B={admittance.virtual_damping_ns_per_m:.2f}，策略跟踪误差 "
           f"{metrics.POLICY_TRACKING_ERROR_MPS:.3f} m/s）")
 
-    best = {"score": float("inf"), "epoch": -1}
+    best = {"score": float("inf"), "epoch": -1, "xy": float("inf")}
     history_log = []
     since_improved = 0
     started = time.time()
@@ -170,6 +189,11 @@ def main() -> None:
                 idx = torch.randint(len(train_x), (args.batch_size,), generator=generator)
             else:
                 idx = losses.sample_balanced_batch(buckets, args.batch_size, generator)
+            if transient_pool is not None:
+                n_tr = max(1, int(round(args.batch_size * args.transient_frac)))
+                pick = transient_pool[torch.randint(len(transient_pool), (n_tr,),
+                                                    generator=generator)]
+                idx = torch.cat([idx[: args.batch_size - n_tr], pick])
             raw_x = train_x[idx].to(device)
             raw_x = apply_imu_augment(raw_x, augment, gen_gpu)   # 增广在归一化之前
             x = (raw_x - mean) / std
@@ -194,15 +218,19 @@ def main() -> None:
         fb, fe = spec.output_slice("force_b")
         report = metrics.force_metrics(pred_values[:, fb:fe], valid["targets"][:, fb:fe])
         score = report["xy_vector_rmse"]
+        if args.guarded_select:
+            fp95 = report.get("zero_false_positive", {}).get("p95_n", 0.0)
+            score = score * (1.0 + max(0.0, fp95 / metrics.Thresholds().zero_false_positive_p95_n - 1.0))
 
-        row = {"epoch": epoch, "score_xy_rmse_n": score,
+        row = {"epoch": epoch, "score": score, "xy_rmse_n": report["xy_vector_rmse"],
+               "zero_fp_p95_n": report.get("zero_false_positive", {}).get("p95_n"),
                "angle_mean_deg": report.get("angle_mean_deg"),
                "mag_rmse_n": report["mag_rmse"], **{f"loss_{k}": v for k, v in epoch_detail.items()}}
         history_log.append(row)
 
         improved = score < best["score"] - 1e-5
         if improved:
-            best = {"score": score, "epoch": epoch}
+            best = {"score": score, "epoch": epoch, "xy": report["xy_vector_rmse"]}
             since_improved = 0
             torch.save({
                 "model": model.state_dict(),
@@ -210,15 +238,18 @@ def main() -> None:
                 "dilations": model.dilations, "residual": model.residual,
                 "norm": model.norm_kind,
                 "input_dim": spec.FRAME_SIZE,
-                "epoch": epoch, "score_xy_rmse_n": score,
+                "epoch": epoch, "score_xy_rmse_n": report["xy_vector_rmse"],
+                "selection_score": score,
             }, out / "estimator.pt")
         else:
             since_improved += 1
 
         angle = f"{report['angle_mean_deg']:.2f}°" if report.get("angle_mean_deg") else "—"
+        fp = report.get("zero_false_positive", {}).get("p95_n")
         print(f"[{epoch:3d}/{args.epochs}] loss {epoch_detail['total']:.4f}   "
-              f"xy_RMSE {score:.3f} N   角度 {angle}   幅值RMSE {report['mag_rmse']:.3f} N"
-              f"{'  ★' if improved else ''}")
+              f"xy_RMSE {report['xy_vector_rmse']:.3f} N   零力FP95 "
+              f"{fp:.2f} N   角度 {angle}" + (f"   分 {score:.3f}" if args.guarded_select else "")
+              + ("  ★" if improved else ""))
 
         if since_improved >= args.patience:
             print(f"[traction] {args.patience} 轮没改善，停在第 {epoch} 轮")
@@ -254,7 +285,8 @@ def main() -> None:
 
     (out / "training_report.json").write_text(json.dumps({
         "best_epoch": best["epoch"],
-        "best_xy_rmse_n": best["score"],
+        "best_xy_rmse_n": best["xy"],
+        "best_selection_score": best["score"],
         "command_budget_n": budget,
         "budget_pass": bool(best["score"] <= budget),
         "parameters": count_parameters(model),
@@ -265,6 +297,8 @@ def main() -> None:
         "torchscript_parity_max_abs": parity,
         "balanced_batches": not args.no_balance,
         "cosine_lr": bool(args.cosine),
+        "guarded_select": bool(args.guarded_select),
+        "transient_frac": args.transient_frac,
         "dataset": str(root),
         "imu_augment": augment.describe(),
         "loss_weights": vars(weights),
@@ -272,8 +306,8 @@ def main() -> None:
         "epochs": history_log,
     }, indent=2, ensure_ascii=False) + "\n")
 
-    print(f"\n[traction] 最好的是第 {best['epoch']} 轮，xy_RMSE {best['score']:.3f} N "
-          f"（预算 {budget:.3f} N → {'过' if best['score'] <= budget else '未过'}）")
+    print(f"\n[traction] 最好的是第 {best['epoch']} 轮，xy_RMSE {best['xy']:.3f} N "
+          f"（预算 {budget:.3f} N → {'过' if best['xy'] <= budget else '未过'}）")
     print(f"[traction] TorchScript 一致性 {parity:.2e}")
     print(f"[traction] 导出 → {out}")
 
