@@ -171,6 +171,8 @@ def main() -> None:
             env_id=merged.env_id[mask],
             policy_id=merged.policy_id[mask],
             attach_offset=merged.attach_offset[mask],
+            profile_kind=merged.profile_kind[mask],
+            since_change=merged.since_change[mask],
         )
         sizes[split] = int(mask.sum())
         print(f"[traction] {split:<11s} {sizes[split]:>8,}  → {out / (split + '.npz')}")

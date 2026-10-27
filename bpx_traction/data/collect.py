@@ -30,6 +30,10 @@ from ..env.tether import TetherApplier
 from . import scenarios
 
 
+#: profile_kind 列的枚举顺序。诊断脚本按它解码，别重排。
+PROFILE_KINDS = ("hold", "ramp", "release", "reverse", "sweep")
+
+
 @dataclass
 class CollectionConfig:
     """一轮采集的参数。"""
@@ -70,6 +74,9 @@ class Rollout:
     env_id: np.ndarray         # (M,)  int32  —— 按它切 train/val/test
     policy_id: np.ndarray      # (M,)  int32
     attach_offset: np.ndarray  # (M, 3) float32  挂点消融用
+    profile_kind: np.ndarray   # (M,)  int8   力剖面类型（PROFILE_KINDS 的下标），诊断用
+    since_change: np.ndarray   # (M,)  int32  距力上次变化（>0.5 N）多少步 —— 零力误报
+                               #              要按"松手后多久"分层，没有它就只能猜
 
     def __len__(self) -> int:
         return len(self.history)
@@ -178,12 +185,21 @@ class TractionCollector:
             dtype=torch.float32, device=self.device,
         )                                                            # (T, N, 3)
 
+        kind_of_env = torch.tensor(
+            [PROFILE_KINDS.index(p.kind) for p in profiles],
+            dtype=torch.int8, device=self.device,
+        )
+        # 距力上次变化多少步：力差 >0.5 N 算一次变化。逐步累计，和样本一起落盘。
+        force_delta = torch.linalg.norm(force_table[1:] - force_table[:-1], dim=2) > 0.5
+        since_change = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+
         self.tether.clear()
         self.base.reset()
         obs = self.env.get_observations()
         self.valid_steps.zero_()
 
         hist_chunks, target_chunks, env_chunks = [], [], []
+        kind_chunks, since_chunks = [], []
         offsets = self.tether.offsets_b.clone()
 
         with torch.no_grad():
@@ -200,12 +216,19 @@ class TractionCollector:
                 else:
                     self._push(frame)
 
+                if step > 0:
+                    since_change = torch.where(
+                        force_delta[step - 1], torch.zeros_like(since_change), since_change + 1
+                    )
+
                 ready = self.valid_steps >= spec.HISTORY_LENGTH
                 if step % cfg.stride == 0 and bool(ready.any()):
                     idx = torch.nonzero(ready).flatten()
                     hist_chunks.append(self.history[idx].clone().cpu())
                     target_chunks.append(self.frames.labels(force_b)[idx].cpu())
                     env_chunks.append(idx.cpu())
+                    kind_chunks.append(kind_of_env[idx].cpu())
+                    since_chunks.append(since_change[idx].to(torch.int32).cpu())
 
                 action = policy(obs)
                 obs, _, dones, _ = self.env.step(action)
@@ -220,6 +243,7 @@ class TractionCollector:
                 np.zeros((0, spec.HISTORY_LENGTH, spec.FRAME_SIZE), np.float32),
                 np.zeros((0, spec.OUTPUT_SIZE), np.float32),
                 np.zeros(0, np.int32), np.zeros(0, np.int32), np.zeros((0, 3), np.float32),
+                np.zeros(0, np.int8), np.zeros(0, np.int32),
             )
 
         env_id = torch.cat(env_chunks).numpy().astype(np.int32)
@@ -229,6 +253,8 @@ class TractionCollector:
             env_id=env_id,
             policy_id=np.full(len(env_id), policy_id, dtype=np.int32),
             attach_offset=offsets.cpu().numpy()[env_id].astype(np.float32),
+            profile_kind=torch.cat(kind_chunks).numpy(),
+            since_change=torch.cat(since_chunks).numpy(),
         )
 
 
@@ -242,6 +268,8 @@ def concat(rollouts: list[Rollout]) -> Rollout:
         env_id=np.concatenate([r.env_id for r in rollouts]),
         policy_id=np.concatenate([r.policy_id for r in rollouts]),
         attach_offset=np.concatenate([r.attach_offset for r in rollouts]),
+        profile_kind=np.concatenate([r.profile_kind for r in rollouts]),
+        since_change=np.concatenate([r.since_change for r in rollouts]),
     )
 
 

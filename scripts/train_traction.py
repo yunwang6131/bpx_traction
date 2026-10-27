@@ -78,6 +78,9 @@ def main() -> None:
     parser.add_argument("--batch-size", dest="batch_size", type=int, default=512)
     parser.add_argument("--steps-per-epoch", dest="steps_per_epoch", type=int, default=200)
     parser.add_argument("--lr", type=float, default=8e-4)
+    parser.add_argument("--cosine", action="store_true",
+                        help="学习率余弦退火到 5%%。恒定 lr 后期在最优点附近打摆，"
+                             "退火换最后一截精度；默认关，和历史运行保持可比")
     parser.add_argument("--weight-decay", dest="weight_decay", type=float, default=1e-4)
     parser.add_argument("--channels", type=int, default=64)
     parser.add_argument("--blocks", type=int, default=4)
@@ -137,6 +140,10 @@ def main() -> None:
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                   weight_decay=args.weight_decay)
+    # T_max 按名义 epochs；早停时退不到底也没关系 —— 要的只是后段把步长压下来
+    scheduler = (torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.epochs, eta_min=args.lr * 0.05)
+        if args.cosine else None)
     weights = losses.LossWeights()
     generator = torch.Generator().manual_seed(args.seed)
     augment = ImuAugment(enabled=args.imu_augment)
@@ -177,6 +184,9 @@ def main() -> None:
             optimizer.step()
             for k, v in detail.items():
                 epoch_detail[k] = epoch_detail.get(k, 0.0) + v / args.steps_per_epoch
+
+        if scheduler is not None:
+            scheduler.step()
 
         # 验证：按**验收指标**选模型，不是按总损失
         pred_values, pred_conf = evaluate(model, normalizer, valid["history"],
@@ -254,6 +264,8 @@ def main() -> None:
         "gait_cycles_visible": round(model.gait_cycles_visible(), 3),
         "torchscript_parity_max_abs": parity,
         "balanced_batches": not args.no_balance,
+        "cosine_lr": bool(args.cosine),
+        "dataset": str(root),
         "imu_augment": augment.describe(),
         "loss_weights": vars(weights),
         "elapsed_s": round(time.time() - started, 1),

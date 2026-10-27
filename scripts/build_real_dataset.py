@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -124,7 +125,15 @@ def main() -> None:
     ap.add_argument("--transient-weight", type=float, default=0.5,
                     help="非稳态帧速度标签的权重折扣")
     ap.add_argument("--warmup", type=float, default=2.0)
+    ap.add_argument("--skip-json", type=Path, default=None,
+                    help="排除窗 json：{录制名: [[t0,t1],…]}，t 是 policy 帧时间（帧号/50）。"
+                         "录制里有碰撞/吊拉/被拖拽的段时必须给 —— 那些帧有外力，"
+                         "拿去当'力=0'的标签是在教估计器低估")
     args = ap.parse_args()
+    skips = {}
+    if args.skip_json:
+        skips = {k: v for k, v in json.load(open(args.skip_json)).items()
+                 if not k.startswith("_")}
 
     all_hist, all_cmd, all_lp, all_steady, all_src = [], [], [], [], []
     for r, rec in enumerate(args.rec):
@@ -136,6 +145,16 @@ def main() -> None:
         aligned = cmd[L - 1 + skip:]
         keep = usable[idx].all(axis=1)
         idx, aligned = idx[keep], aligned[keep]
+
+        ranges = skips.get(rec.name, [])
+        if ranges:
+            tw = idx[:, -1] / spec.POLICY_HZ          # 窗口末帧（=标签帧）的时间
+            bad = np.zeros(len(tw), dtype=bool)
+            for lo, hi in ranges:
+                bad |= (tw >= lo - 0.5) & (tw <= hi + 0.5)   # ±0.5s：盖住整个历史窗
+            idx, aligned = idx[~bad], aligned[~bad]
+            print(f"[{rec.name}] 排除窗丢掉 {int(bad.sum()):,} 窗"
+                  f"（{bad.sum()/spec.POLICY_HZ:.0f} s，{len(ranges)} 段）")
 
         st = steady_mask(aligned, args.steady_s)
         all_hist.append(frames[idx])
