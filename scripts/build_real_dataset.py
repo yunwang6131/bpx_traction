@@ -65,6 +65,53 @@ def steady_mask(cmd: np.ndarray, steady_s: float, tol: float = 0.02) -> np.ndarr
     return since >= n
 
 
+def coverage_report(hist, cmd, src, names) -> None:
+    """数据覆盖审计：微调能不能泛化，取决于这几个轴上采够没有。
+
+    只报数不判定 —— 多少算够取决于目标。但**缺一整个轴**（比如全是平地直行、
+    没有转向）一眼就能看出来，而那正是现在过拟合的原因：一次录制、一种地面。
+
+    俯仰这一栏值得单独盯：真机误报和 `|重力x|` 的相关是 +0.615，按姿态分层能看出
+    误报是不是集中在姿态变化大的时候。
+    """
+    last = hist[:, -1]
+    g = last[:, slice(*spec.term_slice("projected_gravity_b"))]
+    # 重力在机身系的 −z 方向，倾角 = 它和 −ẑ 的夹角
+    tilt = np.degrees(np.arccos(np.clip(-g[:, 2] / np.linalg.norm(g, axis=1), -1.0, 1.0)))
+    vx, vy, wz = (np.abs(cmd[:, k]) for k in range(3))
+    sec = lambda m: m.sum() / spec.POLICY_HZ
+
+    print("\n[覆盖审计]")
+    print(f"  {'录制':<34}{'秒':>7}{'走路':>8}{'转向':>8}{'侧移':>8}")
+    for k, name in enumerate(names):
+        m = src == k
+        print(f"  {Path(name).name:<34}{sec(m):>7.0f}{sec(m & (vx > 0.3)):>8.0f}"
+              f"{sec(m & (wz > 0.3)):>8.0f}{sec(m & (vy > 0.1)):>8.0f}")
+    print(f"  {'合计':<34}{sec(np.ones(len(src), bool)):>7.0f}{sec(vx > 0.3):>8.0f}"
+          f"{sec(wz > 0.3):>8.0f}{sec(vy > 0.1):>8.0f}")
+
+    print(f"\n  前进速度分档(s)   " + "  ".join(
+        f"{lo}–{hi}:{sec((vx >= lo) & (vx < hi)):.0f}"
+        for lo, hi in ((0.05, 0.3), (0.3, 0.6), (0.6, 1.0), (1.0, 1.5), (1.5, 99))))
+    print(f"  机身倾角分档(s)   " + "  ".join(
+        f"{lo}–{hi}°:{sec((tilt >= lo) & (tilt < hi)):.0f}"
+        for lo, hi in ((0, 5), (5, 10), (10, 20), (20, 180))))
+    print(f"  倾角 p50 {np.percentile(tilt, 50):.1f}°  p95 {np.percentile(tilt, 95):.1f}°  "
+          f"max {tilt.max():.1f}°")
+
+    gaps = []
+    if len(names) < 3:
+        gaps.append(f"只有 {len(names)} 段独立录制 —— 样本外指标会被单次 session 的特性带偏")
+    if sec(wz > 0.3) < 30:
+        gaps.append("转向不足 30 s")
+    if sec(vy > 0.1) < 20:
+        gaps.append("侧移不足 20 s")
+    if sec(tilt >= 5) < 20:
+        gaps.append("倾角 ≥5° 的帧不足 20 s —— 姿态变化没覆盖到")
+    for g_ in gaps:
+        print(f"  ⚠ {g_}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--rec", type=Path, nargs="+", required=True,
@@ -113,7 +160,9 @@ def main() -> None:
 
     args.out.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(args.out / "real.npz", history=hist, cmd=cmd,
-                        vel_label=vel, vel_weight=vel_weight, steady=steady, source=src)
+                        vel_label=vel, vel_weight=vel_weight, steady=steady, source=src,
+                        sources=np.array([str(r) for r in args.rec]))
+    coverage_report(hist, cmd, src, [str(r) for r in args.rec])
     print(f"\n[traction] {len(hist):,} 个窗口 → {args.out / 'real.npz'}")
     print(f"           力标签：全部 {len(hist):,} 帧，真值 0 N（采集时没人碰）")
     print(f"           速度标签：全部 {len(hist):,} 帧（指令低通 τ={args.tau_ms:g} ms），"

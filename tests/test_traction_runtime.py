@@ -28,11 +28,15 @@ CALIBRATED = AdmittanceParams(calibrated=True)
 
 
 def gravity_xyzw(quat):
-    """和板子 `projected_gravity_xyzw` 等价的参考实现，只给测试用。"""
+    """和板子 `projected_gravity_xyzw` 逐位等价的参考实现，只给测试用。
+
+    是 ``R(body→world)ᵀ · [0, 0, −1]``，**带负号** —— 站立时应该是 [0, 0, −1]。
+    真机录制里 `projected_gravity_b` 的均值是 [-0.0075, 0.0047, -0.9993]，对得上。
+    """
     x, y, z, w = (float(v) for v in quat)
-    return np.array([2.0 * (x * z - w * y),
-                     2.0 * (y * z + w * x),
-                     1.0 - 2.0 * (x * x + y * y)], dtype=np.float32)
+    return np.array([2.0 * (w * y - x * z),
+                     -2.0 * (w * x + y * z),
+                     -(1.0 - 2.0 * (x * x + y * y))], dtype=np.float32)
 
 
 def snapshot(tau=True, acc=True, standing=True):
@@ -60,7 +64,7 @@ def test_frame_layout_matches_contract():
     assert np.allclose(g("joint_torque"), 4.0)
     # 单位四元数在板子的 xyzw 下是 [0,0,0,1]，契约 wxyz 要变成 [1,0,0,0]
     assert np.allclose(g("quat_wb"), [1, 0, 0, 0])
-    assert np.allclose(g("projected_gravity_b"), [0, 0, 1])
+    assert np.allclose(g("projected_gravity_b"), [0, 0, -1])   # 站立：重力朝机身 −z
 
 
 def test_torque_falls_back_to_pd_when_getter_dies():

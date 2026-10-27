@@ -78,6 +78,8 @@ def main() -> None:
                     help="从哪个检查点开始微调")
     ap.add_argument("--real", type=Path,
                     default=spec.TRACTION_LOG_DIR / "real_finetune" / "real.npz")
+    ap.add_argument("--weighted", type=Path, default=None,
+                    help="配重法打好标签的真机数据（build_weighted_dataset.py 的产物）。\n给了就多走一支批次，用**真机上有力时的真值**监督力头 —— 这是单边的\n力→0 监督补不上的那一半，没有它网络的最优解始终偏向少报")
     ap.add_argument("--dataset", type=Path, default=None,
                     help="仿真数据集，默认跟随 --init 训练时用的那个")
     ap.add_argument("--out", type=Path, default=spec.TRACTION_LOG_DIR / "estimator_real_ft")
@@ -90,6 +92,8 @@ def main() -> None:
     ap.add_argument("--real-weight", type=float, default=1.0, help="真机那一支的总权重 λ")
     ap.add_argument("--anchor-force", type=float, default=1.0)
     ap.add_argument("--anchor-velocity", type=float, default=2.0)
+    ap.add_argument("--weighted-weight", type=float, default=1.0,
+                    help="配重那一支在真机损失里的权重")
     ap.add_argument("--max-sim-degradation", type=float, default=0.20,
                     help="仿真 xy RMSE 允许相对初始值劣化多少，超了的 epoch 不参与选型")
     ap.add_argument("--holdout", type=float, default=0.0,
@@ -151,6 +155,15 @@ def main() -> None:
               f"训练 {cut:,} 窗 / 评估 {n_real - cut:,} 窗（**样本外**）")
     else:
         print("[ft] ⚠ 真机数据全部用于训练，下面报的真机指标是**样本内**的，偏乐观")
+
+    weighted = None
+    if args.weighted is not None:
+        wd = np.load(args.weighted)
+        weighted = (torch.from_numpy(wd["history"].astype(np.float32)),
+                    torch.from_numpy(wd["force_label"].astype(np.float32)))
+        wm = np.linalg.norm(wd["force_label"][:, :2], axis=1)
+        print(f"[ft] 配重标签 {len(wm):,} 窗（{len(wm)/spec.POLICY_HZ:.0f} s），"
+              f"|F_xy| {wm.min():.1f}–{wm.max():.1f} N")
 
     # ---------------- 评估口径 ----------------
     fb, fe = spec.output_slice("force_b")
@@ -214,6 +227,15 @@ def main() -> None:
             real_loss, rdetail = losses.real_anchor_loss(
                 rv, real_v[ri].to(device), real_w[ri].to(device), w, anchor)
 
+            if weighted is not None:
+                wi = torch.randint(len(weighted[0]), (args.real_batch,), generator=gen)
+                wv, _wc = model((weighted[0][wi].to(device) - mean) / std)
+                wmag, wdir, _e = losses.force_losses(
+                    wv[:, slice(*spec.output_slice("force_b"))],
+                    weighted[1][wi].to(device), w)
+                wloss = w.force * wmag + w.direction * wdir
+                real_loss = real_loss + args.weighted_weight * wloss
+                rdetail["real_weighted"] = float(wloss)
             loss = sim_loss + args.real_weight * real_loss
             opt.zero_grad()
             loss.backward()
@@ -257,8 +279,9 @@ def main() -> None:
                       output_names=["values", "confidence"],
                       dynamic_axes={"sensor_history": {0: "batch"},
                                     "values": {0: "batch"}, "confidence": {0: "batch"}})
-    np.savez(args.out / "normalization.npz", mean=normalizer.mean, std=normalizer.std,
-             columns=np.array(spec.column_names()) if hasattr(spec, "column_names") else np.array([]))
+    # 用 Normalizer 自己的 save —— 它会把列名一起写进去。手搓 np.savez 会漏掉列名，
+    # 下一次 Normalizer.load() 的契约校验就会炸（"0 vs 61 维"）。
+    normalizer.save(args.out / "normalization.npz")
 
     # 导出件必须和 eager 一致。上一次就是因为没验这个，拿装错结构的模型做了判断。
     with torch.no_grad():

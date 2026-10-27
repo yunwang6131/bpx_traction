@@ -37,10 +37,12 @@ if str(PROJECT_DIR) not in sys.path:
 
 from bpx_traction import losses, metrics, spec  # noqa: E402
 from bpx_traction.mapping import AdmittanceParams  # noqa: E402
+from bpx_traction import model as model_mod  # noqa: E402
 from bpx_traction.model import (  # noqa: E402
     ForceTCN,
     NormalizedForceTCN,
     count_parameters,
+    from_checkpoint,
 )
 from bpx_traction.normalize import Normalizer  # noqa: E402
 
@@ -81,6 +83,9 @@ def main() -> None:
     parser.add_argument("--dilations", type=int, nargs="+", default=None,
                         help="每个 TCN 块的空洞率。不给=用模型默认的 1 2 4 8（感受野 620 ms）。"
                              "给 1 1 1 1 退回参考实现的 180 ms，连半个步态周期都不到")
+    parser.add_argument("--norm", default="layer", choices=list(model_mod.NORMS),
+                        help="归一化方式。group 的统计量跨时间池化，对窗口内的慢漂移"
+                             "不敏感 —— 真机误报的主成分正是 0.3–0.9 Hz 慢漂移")
     parser.add_argument("--residual", action="store_true",
                         help="TCN 块加残差连接。空洞带来 gridding 伪影，"
                              "最新帧只有一条通路，残差给它一条直通路")
@@ -120,7 +125,7 @@ def main() -> None:
     # ForceTCN 把 None 解释成"全 1 空洞"（消融用），那会静默地把默认值覆盖掉。
     dilation_kwargs = {} if args.dilations is None else {"dilations": args.dilations}
     model = ForceTCN(channels=args.channels, blocks=args.blocks,
-                     residual=args.residual, **dilation_kwargs).to(device)
+                     residual=args.residual, norm=args.norm, **dilation_kwargs).to(device)
     cycles = model.gait_cycles_visible()
     print(f"[traction] 参数 {count_parameters(model):,}  空洞率 {model.dilations}\n"
           f"[traction] 感受野 {model.receptive_field()} 帧 = "
@@ -185,6 +190,7 @@ def main() -> None:
                 "model": model.state_dict(),
                 "channels": args.channels, "blocks": args.blocks,
                 "dilations": model.dilations, "residual": model.residual,
+                "norm": model.norm_kind,
                 "input_dim": spec.FRAME_SIZE,
                 "epoch": epoch, "score_xy_rmse_n": score,
             }, out / "estimator.pt")
@@ -200,12 +206,11 @@ def main() -> None:
             print(f"[traction] {args.patience} 轮没改善，停在第 {epoch} 轮")
             break
 
-    # 用最好的那版导出
-    checkpoint = torch.load(out / "estimator.pt", map_location="cpu")
-    model = ForceTCN(channels=checkpoint["channels"], blocks=checkpoint["blocks"],
-                     dilations=checkpoint.get("dilations"),
-                     residual=checkpoint.get("residual", False)).eval()
-    model.load_state_dict(checkpoint["model"])
+    # 用最好的那版导出。**必须走 from_checkpoint** —— 手搓 ForceTCN(...) 再 load 的话，
+    # 漏传任何一个结构参数都会出事：residual 漏了是**静默**算错（它不带参数，键名一样），
+    # norm 漏了会报键名不匹配。两种都在这个文件里真实发生过。
+    checkpoint = torch.load(out / "estimator.pt", map_location="cpu", weights_only=False)
+    model = from_checkpoint(checkpoint)
     wrapped = NormalizedForceTCN(
         model, torch.from_numpy(normalizer.mean), torch.from_numpy(normalizer.std)
     ).eval()
@@ -237,6 +242,7 @@ def main() -> None:
         "parameters": count_parameters(model),
         "receptive_field_frames": model.receptive_field(),
         "dilations": model.dilations,
+        "norm": model.norm_kind,
         "gait_cycles_visible": round(model.gait_cycles_visible(), 3),
         "torchscript_parity_max_abs": parity,
         "balanced_batches": not args.no_balance,

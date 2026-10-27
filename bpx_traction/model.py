@@ -17,8 +17,15 @@
    等于"看到了未来是零"—— 训练时这是个一致的假象，部署时同样成立，所以不会崩，
    但它让感受野的含义变得含糊。左 padding 下每一帧只看自己和更早的帧，干净。
 
-2. **逐帧 LayerNorm。** 在通道维上归一化，不跨时间。跨时间的归一化（如 GroupNorm(1, C)）
-   会让第 t 帧的输出依赖窗口内更晚的帧 —— 因为窗口固定所以不会出错，但那就不是因果网络了。
+2. **归一化方式可选**（`NORMS`），默认 `"layer"` = 逐帧 LayerNorm，在通道维上归一、不跨时间。
+
+   `"group"` 用 `GroupNorm(4, C)`，统计量跨通道组**和整个时间轴**池化。这会让窗口内
+   第 t 帧的中间表示依赖到更晚的帧 —— 但**部署时仍然是因果的**：窗口的末端就是"现在"，
+   整个窗口都是过去，而前向只读最后一帧（`x[:, :, -1]`），不存在未来的数据参与计算。
+
+   代价是两条：`receptive_field()` 这个说法对 group 不再成立（输出通过归一化统计量
+   依赖全部 25 帧，和卷积够不够得着无关）；以及环形缓冲刚灌满时（25 份同一帧复制）
+   时间方向上方差为零，统计量和稳态差很远，起步那一瞬的输出要单独盯。
 
 输出头的激活和量程全部从 :mod:`bpx_traction.spec` 读，模型不能和契约走散。
 """
@@ -43,19 +50,43 @@ class ChannelLayerNorm(nn.Module):
         return self.norm(x.transpose(1, 2)).transpose(1, 2)
 
 
+#: 可选的归一化方式。差别**只在统计量沿哪些维度池化**，这决定了网络对
+#: "整个窗口共同的慢偏移"敏不敏感：
+#:
+#: * ``"layer"``：:class:`ChannelLayerNorm`，逐帧在通道维上归一。每一帧各算各的，
+#:   窗口内所有帧共有的偏移会**原样传下去**。
+#: * ``"group"``：``nn.GroupNorm(4, C)``，统计量跨 16 个通道**和整个时间轴**池化，
+#:   所以窗口内的共同偏移会被大部分归掉。
+#:
+#: 为什么要有这个开关：真机误报的主成分是 0.3–0.9 Hz 的慢漂移（步态频带只占
+#: 7.9% 能量），而历史窗是 25 帧 = 500 ms —— 这种漂移在一个窗口内近似就是一个
+#: 共同偏移。``"group"`` 是同事 Go2 归档件里的做法，对这个失效模式有直接动机。
+NORMS = ("layer", "group")
+
+
+def _make_norm(kind: str, channels: int) -> nn.Module:
+    if kind == "layer":
+        return ChannelLayerNorm(channels)
+    if kind == "group":
+        if channels % 4:
+            raise ValueError(f"group 归一化要求通道数是 4 的倍数，给的是 {channels}")
+        return nn.GroupNorm(4, channels)
+    raise ValueError(f"未知的归一化方式 {kind!r}，可选 {NORMS}")
+
+
 class CausalBlock(nn.Module):
-    """一层因果 TCN：左补零的 Conv1d + 逐帧 LayerNorm + GELU。
+    """一层因果 TCN：左补零的 Conv1d + 归一化 + GELU。
 
     没有残差连接 —— 原件的 forward 是纯串联（`_5(_4(_3(_2(_1(_0(x))))))`），
     只有 4 层，不加也不会有梯度问题。
     """
 
     def __init__(self, channels: int, kernel_size: int = 3, dilation: int = 1,
-                 residual: bool = False):
+                 residual: bool = False, norm: str = "layer"):
         super().__init__()
         self.pad = (kernel_size - 1) * dilation
         self.conv = nn.Conv1d(channels, channels, kernel_size, dilation=dilation)
-        self.norm = ChannelLayerNorm(channels)
+        self.norm = _make_norm(norm, channels)
         self.act = nn.GELU()
         #: 残差连接。参考实现没有（它也没有空洞），但**加了空洞之后残差就不是可选项**：
         #: 空洞卷积有 gridding 伪影 —— 从输出位置回溯，可达偏移是 a₁·1+a₂·2+a₃·4+a₄·8
@@ -84,6 +115,7 @@ class ForceTCN(nn.Module):
         kernel_size: int = 3,
         dilations: "list[int] | tuple[int, ...] | None" = (1, 2, 4, 8),
         residual: bool = False,
+        norm: str = "layer",
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -91,6 +123,7 @@ class ForceTCN(nn.Module):
         self.kernel_size = kernel_size
         self.num_blocks = blocks
         self.residual = residual
+        self.norm_kind = norm
         #: 每个 TCN 块的空洞率。``None`` = 全 1（参考实现的做法，**已被实测否定**）。
         #:
         #: **为什么要用空洞**：全 1 时感受野只有 ``1 + 4×(3−1) = 9`` 帧 = 180 ms，
@@ -115,7 +148,7 @@ class ForceTCN(nn.Module):
 
         self.encoder = nn.Conv1d(input_dim, channels, kernel_size=1)
         self.tcn = nn.Sequential(
-            *[CausalBlock(channels, kernel_size, d, residual) for d in self.dilations]
+            *[CausalBlock(channels, kernel_size, d, residual, norm) for d in self.dilations]
         )
         self.values = nn.Linear(channels, spec.OUTPUT_SIZE)
         self.confidence = nn.Linear(channels, spec.CONFIDENCE_SIZE)
@@ -166,6 +199,9 @@ def from_checkpoint(ck: dict) -> "ForceTCN":
     `state_dict` 的键和形状完全一样，所以漏传 `residual` 时权重会**静默**装进一个
     结构不同的网络 —— 不报错，只是算出来的东西不对。空洞率同理（`dilations=None`
     会被解释成全 1）。2026-10-26 就是这么把一次真机选型搞反的。
+
+    `norm` 不同则键名会变（LayerNorm 是 `norm.norm.*`，GroupNorm 是 `norm.*`），
+    装错会直接报 missing/unexpected key —— 这一项不会静默失败，但还是记在检查点里。
     """
     model = ForceTCN(
         input_dim=ck["input_dim"],
@@ -173,6 +209,7 @@ def from_checkpoint(ck: dict) -> "ForceTCN":
         blocks=ck["blocks"],
         dilations=tuple(ck["dilations"]),
         residual=bool(ck.get("residual", False)),
+        norm=str(ck.get("norm", "layer")),
     )
     model.load_state_dict(ck["model"])
     model.eval()

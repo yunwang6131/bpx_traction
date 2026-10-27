@@ -315,7 +315,10 @@ def check_model(report: Report) -> None:
     # 因果性：改动感受野之外的老帧，输出必须逐位不变。
     # 默认空洞下感受野 31 帧 > 窗口 25 帧，没有"外面"的帧可改，所以这条结构性质
     # 用非空洞版来验（感受野 9 < 25）。两者共用同一个 CausalBlock。
-    plain = ForceTCN(dilations=None).eval()
+    # 这里验的是 **padding 只补左边**，和归一化方式无关，所以固定用 norm="layer" 跑。
+    # norm="group" 的统计量跨时间池化，整窗都会影响输出 —— 那不是 padding 的问题，
+    # 部署时也仍然因果（窗口末端就是"现在"），见 model.py 的模块文档。
+    plain = ForceTCN(dilations=None, norm="layer").eval()
     outside = spec.HISTORY_LENGTH - plain.receptive_field()
     with torch.no_grad():
         base_v, base_c = plain(x)
@@ -323,7 +326,7 @@ def check_model(report: Report) -> None:
         x2[:, :outside] = torch.randn(2, outside, spec.FRAME_SIZE) * 50.0
         v2, c2 = plain(x2)
     if torch.equal(base_v, v2) and torch.equal(base_c, c2):
-        report.ok("因果卷积", f"非空洞版：最老的 {outside} 帧不影响输出")
+        report.ok("因果卷积", f"非空洞版：最老的 {outside} 帧不影响输出（padding 只补左边）")
     else:
         report.fail("因果卷积", "感受野之外的帧影响了输出 —— padding 不是因果的")
 
