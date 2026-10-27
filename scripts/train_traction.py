@@ -101,6 +101,9 @@ def main() -> None:
                              "真机上读数小 6 倍就被当成'没在动'。见 bpx_traction/augment.py")
     parser.add_argument("--no-balance", dest="no_balance", action="store_true",
                         help="不按力的大小配平批次（消融用）")
+    parser.add_argument("--fp-hinge", dest="fp_hinge", type=float, default=0.0,
+                        help="零力样本预测幅值超过这个值(N)就线性重罚，对齐误报验收线。"
+                             "0=关。建议值 2.0（= 验收线）")
     parser.add_argument("--transient-frac", dest="transient_frac", type=float, default=0.0,
                         help="每批抽这么大比例的瞬态窗样本（力变化后 1 s 内，按 since_change 列选）。"
                              "Go2 的 aligned_window 臂用 64/512=12.5%%。零力误报的大头在松绳后的"
@@ -163,7 +166,7 @@ def main() -> None:
     scheduler = (torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs, eta_min=args.lr * 0.05)
         if args.cosine else None)
-    weights = losses.LossWeights()
+    weights = losses.LossWeights(fp_hinge_n=args.fp_hinge)
     generator = torch.Generator().manual_seed(args.seed)
     augment = ImuAugment(enabled=args.imu_augment)
     gen_gpu = torch.Generator(device=device).manual_seed(args.seed)
@@ -299,6 +302,7 @@ def main() -> None:
         "cosine_lr": bool(args.cosine),
         "guarded_select": bool(args.guarded_select),
         "transient_frac": args.transient_frac,
+        "fp_hinge_n": args.fp_hinge,
         "dataset": str(root),
         "imu_augment": augment.describe(),
         "loss_weights": vars(weights),

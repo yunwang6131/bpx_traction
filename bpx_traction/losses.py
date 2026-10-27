@@ -51,6 +51,17 @@ class LossWeights:
     #: 置信度的标定目标 `exp(-decay · err)`。decay 越大，要求越严。
     calibration_decay: float = 3.0
 
+    #: 零力误报的铰链惩罚：真值 < FORCE_ACTIVE_N 的样本，预测幅值超过
+    #: `fp_hinge_n` 的部分线性重罚。0 = 关。
+    #:
+    #: 为什么要有它：零力样本的 smooth_l1 对"报 3 N"和"报 1 N"的梯度几乎一样
+    #: （都在二次段里），但验收线是 p95 ≤ 2 N —— 2 N 以下无所谓、以上才是事故。
+    #: 铰链把惩罚对齐到验收语义：线下免费，线上线性加价。
+    #: 风险是把低力段的灵敏度一起压没（估计器学会"宁可少报"），所以要和
+    #: 守卫选型一起用，看 2–5 N 的幅值斜率有没有塌。
+    fp_hinge_n: float = 0.0
+    fp_hinge_weight: float = 2.0
+
 
 def _slices() -> dict[str, slice]:
     return {name: slice(*spec.output_slice(name)) for name, _ in spec.OUTPUT_TERMS}
@@ -83,6 +94,12 @@ def force_losses(
         torch.ones_like(per_sample),
     )
     magnitude_loss = (per_sample * sample_weight).mean()
+
+    if weights.fp_hinge_n > 0:
+        pred_mag = torch.linalg.norm(pred_force[:, :2], dim=1)
+        excess = (pred_mag - weights.fp_hinge_n).clamp_min(0.0) / scale
+        magnitude_loss = magnitude_loss + weights.fp_hinge_weight * (
+            excess * (~active).float()).mean()
 
     # 方向：只看 xy 平面。零力的方向是未定义的，不是"算错了"，所以只在有力的样本上算。
     xy_active = torch.linalg.norm(true_force[:, :2], dim=1) > spec.FORCE_ACTIVE_N
