@@ -35,6 +35,10 @@ class LossWeights:
     load: float = 1.0
 
     force: float = 3.0           # 力这一项的总权重
+    #: 显式幅值匹配：直接惩罚 ‖pred_xy‖ vs ‖true_xy‖ 的差。逐轴 smooth_l1 把幅值和方向
+    #: 耦在一起，方向稍偏时幅值梯度会被稀释 → 系统性低估（实测斜率 0.94）。参考实现
+    #: （direction_balance_common）用 0.25 的权重单独匹配范数。0=关。
+    norm_match: float = 0.0
     force_xy: float = 1.0        # 力内部：水平分量（映射只用这个）
     force_z: float = 0.5         # 力内部：竖直分量（估但不用，少占梯度）
     direction: float = 1.5       # xy 平面内的方向
@@ -110,6 +114,13 @@ def force_losses(
         direction_loss = (1.0 - cos).mean()
     else:
         direction_loss = pred_force.sum() * 0.0          # 保持计算图连通
+
+    # 显式幅值匹配（解耦幅值与方向，专治系统性低估）
+    if weights.norm_match > 0:
+        pn = torch.linalg.norm(pred_force[:, :2], dim=1) / scale
+        tn = torch.linalg.norm(true_force[:, :2], dim=1) / scale
+        magnitude_loss = magnitude_loss + weights.norm_match * (
+            nn.functional.smooth_l1_loss(pn, tn, reduction="none") * sample_weight).mean()
 
     # 用于置信度标定的"力误差"：按 force_norm_n 归一的平均绝对误差
     force_error = (pred_force - true_force).abs().mean(dim=1) / scale
