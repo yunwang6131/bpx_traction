@@ -52,9 +52,18 @@ parser.add_argument("--handler-speed", dest="handler_speed", type=float, default
 parser.add_argument("--oracle-force", dest="oracle_force", action="store_true",
                     help="用真值力代替估计器 —— 分清'链路设计问题'和'估计器不够准'")
 parser.add_argument("--output", type=str, default=None)
+parser.add_argument("--video", action="store_true",
+                    help="录 mp4（Isaac 真实渲染，相机跟拍 follow 场景的狗）。自动开离屏渲染")
+parser.add_argument("--video-scene", dest="video_scene", type=str, default="follow",
+                    choices=list(("follow", "idle", "release", "turn")),
+                    help="录哪个场景的狗（相机跟它）")
 AppLauncher.add_app_launcher_args(parser)
 parser.set_defaults(headless=True)
 args_cli = parser.parse_args()
+
+if args_cli.video:
+    args_cli.headless = True
+    args_cli.enable_cameras = True
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -103,9 +112,27 @@ class ClosedLoop:
             env_cfg, num_envs=self.num_envs,
             episode_length_s=max(60.0, 4 * args_cli.duration_s),
         )
-        self.env = RslRlVecEnvWrapper(
-            gym.make(args_cli.task, cfg=env_cfg), clip_actions=load_agent_cfg().clip_actions
-        )
+        # 相机跟拍目标场景的狗（和 play.py 同一套：origin_type=asset_root）
+        video_env_index = SCENES.index(args_cli.video_scene) * args_cli.envs_per_scene
+        if args_cli.video:
+            env_cfg.viewer.origin_type = "asset_root"
+            env_cfg.viewer.asset_name = "robot"
+            env_cfg.viewer.env_index = video_env_index
+            env_cfg.viewer.eye = (2.2, 2.2, 1.0)
+            env_cfg.viewer.lookat = (0.0, 0.0, 0.2)
+
+        raw_env = gym.make(args_cli.task, cfg=env_cfg,
+                           render_mode="rgb_array" if args_cli.video else None)
+        if args_cli.video:
+            video_dir = str(PROJECT_DIR / "logs" / "videos")
+            steps = int(round(args_cli.duration_s / (env_cfg.sim.dt * env_cfg.decimation)))
+            raw_env = gym.wrappers.RecordVideo(
+                raw_env, video_folder=video_dir, step_trigger=lambda s: s == 0,
+                video_length=steps, disable_logger=True,
+                name_prefix=f"traction_{args_cli.video_scene}",
+            )
+            print(f"[traction] 录像 → {video_dir}/traction_{args_cli.video_scene}*.mp4")
+        self.env = RslRlVecEnvWrapper(raw_env, clip_actions=load_agent_cfg().clip_actions)
         self.base = self.env.unwrapped
         self.robot = self.base.scene["robot"]
         self.device = self.base.device
@@ -179,7 +206,8 @@ class ClosedLoop:
         self.history[:] = frame.unsqueeze(1).expand(-1, spec.HISTORY_LENGTH, -1)
 
         rec = {k: [] for k in ("tension", "distance", "taut", "speed", "proj",
-                               "cmd_speed", "force_err", "terminated")}
+                               "cmd_speed", "force_err", "terminated",
+                               "robot_xy", "handler_xy", "heading")}
 
         with torch.no_grad():
             for step in range(steps):
@@ -237,6 +265,13 @@ class ClosedLoop:
                 rec["force_err"].append(
                     torch.linalg.norm(est_force_b[:, :2] - f_b, dim=1).cpu())
                 rec["terminated"].append(dones.bool().cpu())
+                rec["robot_xy"].append(self.robot.data.root_pos_w[:, :2].cpu())
+                rec["handler_xy"].append(self.leash.handler_pos[:, :2].cpu())
+                # 机身朝向（yaw），画朝向箭头用
+                q = self.robot.data.root_quat_w
+                yaw = torch.atan2(2*(q[:,0]*q[:,3]+q[:,1]*q[:,2]),
+                                  1-2*(q[:,2]**2+q[:,3]**2))
+                rec["heading"].append(yaw.cpu())
 
         self.tether.clear()
         self.env.close()
@@ -327,6 +362,14 @@ def main() -> None:
         spec.TRACTION_LOG_DIR / ("closed_loop_oracle.json" if args_cli.oracle_force
                                  else "closed_loop.json"))
     out.parent.mkdir(parents=True, exist_ok=True)
+    # 轨迹单独存 npz（给可视化画俯视动画用）
+    traj_path = out.with_name(out.stem + "_traj.npz")
+    np.savez(traj_path, robot_xy=rec["robot_xy"], handler_xy=rec["handler_xy"],
+             heading=rec["heading"], taut=rec["taut"], speed=rec["speed"],
+             scene_id=scene_id, release_step=release_step,
+             envs_per_scene=args_cli.envs_per_scene, dt=loop.dt)
+    print(f"[traction] 轨迹 → {traj_path}")
+
     out.write_text(json.dumps({
         "policy": str(resolve_checkpoint(args_cli.policy)),
         "oracle_force": args_cli.oracle_force,
