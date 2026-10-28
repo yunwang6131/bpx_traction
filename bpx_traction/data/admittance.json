@@ -1,9 +1,9 @@
 {
   "virtual_mass_kg": 3.2,
   "virtual_damping_ns_per_m": 13.333333333333334,
-  "deadzone_on_n": 25.0,
+  "deadzone_on_n": 20.0,
   "deadzone_off_n": 12.0,
-  "engage_hold_s": 0.3,
+  "engage_hold_s": 0.2,
   "release_hold_s": 0.0,
   "min_speed_mps": 0.15,
   "stand_threshold_mps": 0.1,

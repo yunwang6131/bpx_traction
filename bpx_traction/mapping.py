@@ -74,8 +74,10 @@ class AdmittanceParams:
     virtual_damping_ns_per_m: float = 13.333333333333334
 
     # --- 死区（Schmitt 迟滞，避免边界抖动）---
-    deadzone_on_n: float = 25.0           # 实测标定：0.3s 去抖下零误起步的最保守阈值
-    deadzone_off_n: float = 12.0          # 实测标定：远高于运动误报 p50 2.4 / p90 7.9
+    deadzone_on_n: float = 20.0           # 2026-10-28 真机拉绳实测复标：拉力峰值~27N、
+                                          # 每次持续0.8-1.1s；25N 撑不满去抖故从不起步，
+                                          # 降到20N(>走路噪声p99 18.6)则3次拉绳全部起步
+    deadzone_off_n: float = 12.0          # 远高于运动误报 p50 2.4 / p90 7.9
     # 占位值来自 Go2 的跟随阈值（‖F_xy‖ ≥ 8 N 必须跟随、< 8 N 必须站住）。
     #
     # 2026-10-26 用真机量过两轮，结论都是**现有估计器定不出可用的死区**，所以占位值
@@ -124,7 +126,7 @@ class AdmittanceParams:
     #:     估计器感受野 180 ms + 去抖 engage_hold_s + 导纳 τ
     #: 默认 0.2 s 下合计约 0.5 s，正好压在响应预算上。调大它更不容易误触发，
     #: 但人拉绳子之后要等更久才动。
-    engage_hold_s: float = 0.30          # 实测：0.3s 去抖把 25N 的误起步从 0.4/min 压到 0
+    engage_hold_s: float = 0.20          # 真机拉绳尖峰最长0.76s,0.2s稳接;0.3s会漏掉偏短的拉
     #: 反过来：力掉到 `deadzone_off_n` 以下多久才停。设成 0 = 立刻停（更安全）。
     release_hold_s: float = 0.0
 
