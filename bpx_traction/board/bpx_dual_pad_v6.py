@@ -413,6 +413,9 @@ class App:
             'policy_target_mono': 0.0, 'policy_last_action': np.zeros(12, np.float32),
             'stand_stable_since': None, 'policy_autostart_armed': False,
         }
+        # 牵引上层：默认关。--traction 时在首次进 POLICY 前 lazy 构造（onnxruntime 建 session 慢）。
+        self.traction = None
+        self.traction_enabled_flag = bool(getattr(args, 'traction', False))
         self.latest = None
         self.last_seq = None
         self.last_seq_arrival = 0.0
@@ -1176,6 +1179,9 @@ class App:
                           policy_autostart_armed=False)
         if self.rec is not None:
             self.rec.policy(command, policy_state['history'][-1], raw, target, new_session=True)
+        # 牵引上层：门4 预检。策略已就绪的上下文里跑，失败只是不启用牵引、绝不挡走路。
+        if self.traction_enabled_flag:
+            self._setup_traction(target)
         self.mode = 'policy'  # atomic handoff: never enters damping first.
         self.policy_thread = threading.Thread(
             target=self.policy_loop, args=(session, input_names, generation, policy_state),
@@ -1184,6 +1190,29 @@ class App:
         print('[门2] %s → POLICY（档位 %d，前进满杆 %.1f m/s；50Hz 推理/500Hz 下发）' %
               (trigger, self.gear + 1, POLICY_VX_FWD_MAX * GEARS[self.gear]), flush=True)
         return True
+
+    def _setup_traction(self, policy_target):
+        """首次进 POLICY 时 lazy 构造牵引 runtime 并跑门4。任何失败都只是不启用，不抛。"""
+        try:
+            from bpx_traction.board.traction_runtime import TractionRuntime
+            from bpx_traction import spec as tspec
+            if self.traction is None:
+                onnx = self.a.traction_onnx or str(tspec.DEFAULT_ESTIMATOR_DIR / 'estimator.onnx')
+                self.traction = TractionRuntime(
+                    onnx, projected_gravity_xyzw,
+                    kp=KP_POLICY, kd=KD_POLICY, fusion=self.a.traction_fusion)
+                print('[牵引] runtime 就绪：%s  融合=%s' % (onnx, self.a.traction_fusion), flush=True)
+            snap = self.snapshot()
+            with self.state_lock:
+                la = self.S['policy_last_action']
+            ok, reason = self.traction.enable(snap, la, policy_target)
+            if ok:
+                print('[门4] 牵引启用', flush=True)
+            else:
+                print('[门4] 牵引被拒（不影响走路）：%s' % reason, flush=True)
+        except Exception as exc:
+            print('[牵引] 构造/预检异常（不影响走路）：%r' % (exc,), flush=True)
+            self.traction = None
 
     def stop_policy(self, reason):
         with self.state_lock:
@@ -1195,6 +1224,8 @@ class App:
         if was_policy:
             self.mode = 'joint'
             print('[POLICY] 停止：%s' % reason, flush=True)
+        if self.traction is not None and self.traction.enabled:
+            self.traction.disable('策略停止：%s' % reason)
         thread = self.policy_thread
         if thread is not None and thread is not threading.current_thread() and thread.is_alive():
             thread.join(timeout=0.2)
@@ -1212,6 +1243,14 @@ class App:
                     if generation != self.S['policy_generation'] or self.S['sub'] != 'policy':
                         return
                 command = self.policy_cmd()
+                if self.traction is not None and self.traction.enabled:
+                    # 牵引融合：失败/异常时 fuse 内部原样返回手柄指令并自关，不拖垮走路。
+                    snap = self.snapshot()
+                    if snap is not None:
+                        with self.state_lock:
+                            la = self.S['policy_last_action']
+                            pt = self.S['policy_target']
+                        command = self.traction.fuse(command, snap, la, pt)
                 raw, target = self.step_policy_state(
                     session, input_names, policy_state, command)
                 with self.state_lock:
@@ -1510,6 +1549,12 @@ def parse_args():
     parser.add_argument('--passive-delay', type=float, default=1.0, help='趴下完成后开始渐进放松前等待秒数')
     parser.add_argument('--retry-interval', type=float, default=1.5, help='机器人/手柄离线重试间隔')
     parser.add_argument('--no-record', action='store_true', help='do not write log/rec_*.bin (walk recording)')
+    parser.add_argument('--traction', action='store_true',
+                        help='启用牵引上层（力估计→速度指令）。默认关。摇杆一动牵引让位')
+    parser.add_argument('--traction-onnx', default=None,
+                        help='牵引估计器 onnx 路径。默认 spec.DEFAULT_ESTIMATOR_DIR/estimator.onnx')
+    parser.add_argument('--traction-fusion', default='preempt', choices=['preempt', 'add'],
+                        help='融合模式：preempt(默认,手柄一动牵引全让位) / add(叠加)')
     return parser.parse_args()
 
 
