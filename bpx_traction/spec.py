@@ -347,7 +347,7 @@ TRACTION_LOG_DIR = rma_spec.LOG_DIR / "traction"
 #: **仍然不能上真机**：留出法下要零误起步得把死区放到 30 N，正好等于设计范围上限
 #: （`FORCE_DESIGN_RANGE_N`），可用区间是零。瓶颈是真机数据量 —— 样本外指标在
 #: epoch 32 就平了，继续训没用。详见 `mapping.py` 的 `deadzone_on_n`。
-DEFAULT_ESTIMATOR_DIR = TRACTION_LOG_DIR / "estimator_real_ft"
+DEFAULT_ESTIMATOR_DIR = TRACTION_LOG_DIR / "v2" / "combo_s1_realft"
 
 
 def summary() -> str:

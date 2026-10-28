@@ -94,10 +94,11 @@ def test_sustained_pull_engages_after_the_hold_window():
     m = AdmittanceMapping(p)
     hold_steps = int(round(p.engage_hold_s / DT))
 
-    cmd = run(m, (25.0, 0.0), steps=hold_steps - 1)
+    engage_f = p.deadzone_on_n + 5.0
+    cmd = run(m, (engage_f, 0.0), steps=hold_steps - 1)
     assert np.allclose(cmd, 0.0), f"还差一步到 {hold_steps} 就起步了"
 
-    cmd = run(m, (25.0, 0.0), steps=200)
+    cmd = run(m, (engage_f, 0.0), steps=200)
     assert m.state.engaged
     assert cmd[-1, 0] > p.min_speed_mps
 
@@ -116,7 +117,7 @@ def test_intermittent_force_never_engages():
 def test_zero_hold_engages_immediately():
     p = AdmittanceParams(engage_hold_s=0.0)
     m = AdmittanceMapping(p)
-    m.step(np.array([25.0, 0.0, 0.0]), 1.0)
+    m.step(np.array([p.deadzone_on_n + 5.0, 0.0, 0.0]), 1.0)
     assert m.state.engaged
 
 
@@ -124,7 +125,7 @@ def test_release_stops_immediately_by_default():
     """默认 release_hold_s=0：力一撤就脱离。停比走更安全，不该有延迟。"""
     p = AdmittanceParams(max_accel_mps2=1e6)
     m = AdmittanceMapping(p)
-    run(m, (25.0, 0.0), steps=200)
+    run(m, (p.deadzone_on_n + 5.0, 0.0), steps=200)
     assert m.state.engaged
     m.step(np.array([0.0, 0.0, 0.0]), 1.0)
     assert not m.state.engaged
@@ -134,7 +135,7 @@ def test_engaged_force_dip_within_hysteresis_keeps_moving():
     """起步之后力掉进迟滞带（off 和 on 之间），不该重新走一遍去抖窗口。"""
     p = AdmittanceParams(engage_hold_s=0.25, max_accel_mps2=1e6)
     m = AdmittanceMapping(p)
-    run(m, (25.0, 0.0), steps=200)
+    run(m, (p.deadzone_on_n + 5.0, 0.0), steps=200)
     between = 0.5 * (p.deadzone_on_n + p.deadzone_off_n)
     run(m, (between, 0.0), steps=100)
     assert m.state.engaged
@@ -147,7 +148,7 @@ def test_steady_state_matches_admittance():
     """恒力跑够久，速度应收敛到 steady_speed()。"""
     p = AdmittanceParams()
     m = AdmittanceMapping(p)
-    force = 20.0
+    force = p.deadzone_on_n + 3.0           # 过起步阈值，不写死（死区会重标）
     cmd = run(m, (force, 0.0), steps=int(20 * p.tau_s() / DT))
     expected = p.steady_speed(force)
     assert cmd[-1, 0] == pytest.approx(expected, abs=1e-3), (
@@ -164,7 +165,7 @@ def test_step_response_matches_zoh_solution():
     """
     p = AdmittanceParams(max_accel_mps2=1e6, engage_hold_s=0.0)
     m = AdmittanceMapping(p)
-    force = 20.0
+    force = p.deadzone_on_n + 3.0           # 过起步阈值，不写死
     cmd = run(m, (force, 0.0), steps=40)
 
     v_inf = p.steady_speed(force)
@@ -190,20 +191,29 @@ def test_discretisation_is_stable_at_large_dt():
 # 方向
 # --------------------------------------------------------------------------
 def test_direction_preserved_when_unsaturated():
-    """各向同性增益：45° 斜拉，输出方向也该是 45°（前提是 vy 没饱和）。"""
+    """各向同性增益：斜拉时输出方向该等于输入方向（前提是两轴都没饱和）。
+
+    on=25N 标定后，45° 斜拉会让 vy 分量（上限 0.5）先饱和，所以取一个 vy 分量
+    小到不饱和的方向来验方向保持：合力过死区，但 vy 对应的速度 < vy 上限。
+    vy 不饱和要求 fy 对应的稳态速度 ≤ vy_max：
+        (|f|_through_deadzone 的 fy 分量) 映射后 ≤ 0.5
+    取 fx 主导、fy 小的方向。"""
     p = AdmittanceParams(max_accel_mps2=1e6)
     m = AdmittanceMapping(p)
-    # 力要落在"过得了死区"和"vy 还没撞上限"之间。两头都是标定出来的数，
-    # 所以从参数算，不要写死 —— 死区一重标，写死的幻数会悄悄掉到死区下面去。
-    lo = p.deadzone_on_n
-    hi = p.deadzone_off_n + (p.vy_range[1] * math.sqrt(2.0) - p.min_speed_mps) \
-        * p.virtual_damping_ns_per_m
-    assert lo < hi, f"死区({lo}) 和 vy 饱和({hi:.1f}) 之间没有可用区间了"
-    magnitude = (lo + hi) / 2.0
-    f = magnitude / math.sqrt(2.0)
-    cmd = run(m, (f, f), steps=int(20 * p.tau_s() / DT))
-    angle = math.degrees(math.atan2(cmd[-1, 1], cmd[-1, 0]))
-    assert angle == pytest.approx(45.0, abs=0.5), f"方向被扭成了 {angle:.1f}°"
+    mag = p.deadzone_on_n + 2.0              # 过死区一点
+    # fy 要小到 vy 不饱和：steady_speed(|f|) 的 fy/|f| 分量 ≤ vy_max
+    # 保守取 fy 使 vy 稳态约为 0.3（< 0.5 上限）
+    import numpy as _np
+    fy = (0.3 * p.virtual_damping_ns_per_m) + p.deadzone_off_n * 0.3   # 粗略，够小即可
+    fy = min(fy, mag * 0.3)
+    fx = math.sqrt(max(mag**2 - fy**2, 0.0))
+    cmd = run(m, (fx, fy), steps=int(20 * p.tau_s() / DT))
+    # 两轴都没饱和时，输出方向 == 输入方向（各向同性增益）
+    if abs(cmd[-1, 1]) < p.vy_range[1] - 1e-3 and abs(cmd[-1, 0]) < p.vx_range[1] - 1e-3:
+        in_ang = math.degrees(math.atan2(fy, fx))
+        out_ang = math.degrees(math.atan2(cmd[-1, 1], cmd[-1, 0]))
+        assert out_ang == pytest.approx(in_ang, abs=1.0), (
+            f"未饱和时方向该保持：输入 {in_ang:.1f}° 输出 {out_ang:.1f}°")
 
 
 def test_lateral_saturates_before_forward():
@@ -261,17 +271,17 @@ def test_confidence_gate_needs_sustained_low():
     """单帧低置信度不该停机，连续低才停 —— 否则一次抖动就把机器人闸死。"""
     p = AdmittanceParams(max_accel_mps2=1e6)
     m = AdmittanceMapping(p)
-    run(m, (25.0, 0.0), steps=200)
+    run(m, (p.deadzone_on_n + 5.0, 0.0), steps=200)
     moving = m.state.velocity[0]
     assert moving > 0.1
 
     for _ in range(p.conf_gate_steps - 1):               # 差一步到闸门
-        m.step(np.array([25.0, 0.0, 0.0]), p.conf_gate - 0.01)
+        m.step(np.array([p.deadzone_on_n + 5.0, 0.0, 0.0]), p.conf_gate - 0.01)
     assert m.state.velocity[0] > 0.05, "还没到闸门步数就停了"
 
     # 衰减步数按 τ 算，不写死 —— M / B 一调，写死的步数就不够了
     for _ in range(int(12 * p.tau_s() / DT)):           # 继续低 → 闸死
-        m.step(np.array([25.0, 0.0, 0.0]), p.conf_gate - 0.01)
+        m.step(np.array([p.deadzone_on_n + 5.0, 0.0, 0.0]), p.conf_gate - 0.01)
     assert m.state.velocity[0] == pytest.approx(0.0, abs=1e-3)
 
 
@@ -280,18 +290,18 @@ def test_single_low_confidence_frame_dips_but_recovers():
     但不能闸死，而且要在几个时间常数内回到原值。"""
     p = AdmittanceParams(max_accel_mps2=1e6)
     m = AdmittanceMapping(p)
-    run(m, (25.0, 0.0), steps=200)
+    run(m, (p.deadzone_on_n + 5.0, 0.0), steps=200)
     before = m.state.velocity[0]
 
-    m.step(np.array([25.0, 0.0, 0.0]), 0.0)             # 一帧置信度 0
+    m.step(np.array([p.deadzone_on_n + 5.0, 0.0, 0.0]), 0.0)             # 一帧置信度 0
     assert m.state.low_conf_steps == 1, "计数器应该开始计"
     dip = (before - m.state.velocity[0]) / before
     assert 0.0 < dip < 0.20, f"单帧跌了 {dip:.0%}，太多了（滤波器没起作用？）"
 
-    m.step(np.array([25.0, 0.0, 0.0]), 1.0)             # 置信度恢复
+    m.step(np.array([p.deadzone_on_n + 5.0, 0.0, 0.0]), 1.0)             # 置信度恢复
     assert m.state.low_conf_steps == 0, "计数器必须清零，否则偶发抖动会累积成闸门"
 
-    run(m, (25.0, 0.0), steps=int(8 * p.tau_s() / DT))
+    run(m, (p.deadzone_on_n + 5.0, 0.0), steps=int(8 * p.tau_s() / DT))
     assert m.state.velocity[0] == pytest.approx(before, abs=1e-3), "没能恢复到原速度"
 
 

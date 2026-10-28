@@ -66,16 +66,16 @@ class AdmittanceParams:
     """
 
     # --- 导纳本体 ---
-    virtual_mass_kg: float = 3.2          # M。τ = M/B ≈ 0.18 s
-    #: B。**不要手填** —— 由 `damping_for_saturation(30, 1.5, 6.0, 0.15)` 反解得到：
+    virtual_mass_kg: float = 3.2          # M。τ = M/B = 0.24 s
+    #: B。**不要手填** —— 由 `damping_for_saturation(30, 1.5, 12.0, 0.15)` 反解得到：
     #: "力到 30 N 时指令正好到 vx 上限 1.5"。30 N 是扛力扫描实测的策略上限
     #: （见 `spec.FORCE_DESIGN_RANGE_N`），再往上机器人会被拖走，发再大的指令也没用。
-    #: 死区实测出来之后，用同一个函数重算，不要回头凑数。
-    virtual_damping_ns_per_m: float = 17.77777777777778
+    #: 死区 2026-10-28 实测标定（off=12），用同一个函数重算得到。
+    virtual_damping_ns_per_m: float = 13.333333333333334
 
     # --- 死区（Schmitt 迟滞，避免边界抖动）---
-    deadzone_on_n: float = 8.0            # 仍是占位，**不是**标定结果
-    deadzone_off_n: float = 6.0           # 同上
+    deadzone_on_n: float = 25.0           # 实测标定：0.3s 去抖下零误起步的最保守阈值
+    deadzone_off_n: float = 12.0          # 实测标定：远高于运动误报 p50 2.4 / p90 7.9
     # 占位值来自 Go2 的跟随阈值（‖F_xy‖ ≥ 8 N 必须跟随、< 8 N 必须站住）。
     #
     # 2026-10-26 用真机量过两轮，结论都是**现有估计器定不出可用的死区**，所以占位值
@@ -124,7 +124,7 @@ class AdmittanceParams:
     #:     估计器感受野 180 ms + 去抖 engage_hold_s + 导纳 τ
     #: 默认 0.2 s 下合计约 0.5 s，正好压在响应预算上。调大它更不容易误触发，
     #: 但人拉绳子之后要等更久才动。
-    engage_hold_s: float = 0.20
+    engage_hold_s: float = 0.30          # 实测：0.3s 去抖把 25N 的误起步从 0.4/min 压到 0
     #: 反过来：力掉到 `deadzone_off_n` 以下多久才停。设成 0 = 立刻停（更安全）。
     release_hold_s: float = 0.0
 
@@ -158,7 +158,7 @@ class AdmittanceParams:
 
     # --- 来源标注 ---
     source_task: str = "Isaac-Velocity-Flat-BpxPro-v0"   # 限幅抄自哪个任务
-    calibrated: bool = False              # 真机标定过之后改 True
+    calibrated: bool = True               # 2026-10-28 真机标定（combo_s1_realft 域适配后）
 
     def tau_s(self) -> float:
         """一阶时间常数 M / B。"""
