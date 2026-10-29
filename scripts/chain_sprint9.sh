@@ -12,7 +12,8 @@ cd /home/wangyun/intern/ZGYD/bpx || exit 1
 source ~/anaconda3/etc/profile.d/conda.sh
 conda activate bpx_rma || { echo "[s9] conda activate 失败"; exit 1; }
 
-EXP=bpx_pro_sprint9
+# BPX_S9_EXP 可覆盖实验名，用来和前一次并排对照（换旋钮时别把日志混在一个目录里）
+EXP="${BPX_S9_EXP:-bpx_pro_sprint9}"
 YAML="${BPX_PRO_PARAMS_YAML:-data/bpx_pro_training_params.yaml}"
 ITERS="${1:-1200}"
 SEED_SRC=released/bpx_pro_sprint7_teacher
@@ -36,9 +37,9 @@ python -u scripts/train.py --headless --task Isaac-Velocity-Flat-BpxPro-Sprint9-
     --num_envs 4096 --max_iterations "${ITERS}" \
     --resume --load-run ".*s7seed_teacher" \
     --experiment-name "${EXP}" --run-name teacher \
-    > logs/train_teacher_sprint9.log 2>&1
+    > "logs/train_teacher_${EXP#bpx_pro_}.log" 2>&1
 rc=$?; echo "[s9] $(date '+%F %T') teacher 退出码 ${rc}"
-[ ${rc} -ne 0 ] && { echo "[s9] 中止，看 logs/train_teacher_sprint9.log"; exit 1; }
+[ ${rc} -ne 0 ] && { echo "[s9] 中止，看 logs/train_teacher_${EXP#bpx_pro_}.log"; exit 1; }
 
 cat <<'EOT'
 

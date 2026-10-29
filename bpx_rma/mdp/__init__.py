@@ -15,6 +15,8 @@ from .rewards import (  # noqa: F401
     feet_gait,
     flat_orientation_roll_l2,
     foot_clearance_deficit,
+    ang_vel_deficit,
+    flat_orientation_roll_l2_gated,
     foot_clearance_deficit_gated,
     foot_clearance_penalty,
     joint_acc_l2_gated,

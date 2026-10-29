@@ -737,7 +737,25 @@ class BpxProFlatSprint9EnvCfg(BpxProFlatSprint7EnvCfg):
     CLEARANCE_GATE_MIN = 0.3
     #: 速度亏空权重。调大更敢冲但更容易"扑出去"（靠第 3 条的终止项兜）。
     VEL_DEFICIT_WEIGHT = -0.3
-    #: 蹲姿冻结的判据。实测冻结在 0.268–0.273、奔跑在 0.356 以上，取中间偏下。
+    #: 蹲姿冻结的判据。奔跑时机身在 0.356 以上，所以这个阈值的上限由奔跑决定。
+    #:
+    #: 0.28 → 0.25 的依据（2026-10-26，第一次 sprint9 训练
+    #: logs/rsl_rl/bpx_pro_sprint9/2026-10-26_12-12-52_teacher）：
+    #:   * 0.28 时 `low_height` 占终止 **33.4%** —— 远超 5% 的可接受线，而且 300 迭代后
+    #:     就平在那儿不再降；回合长度 729 vs sprint7 的 995，约 27% 的采样被早终止吃掉。
+    #:   * play 复测里**冷启动 6.0 仍然站桩**（vx 0.028、步频 0.44 Hz、占空比 93–95%），
+    #:     而冷启动 4.5 已经修好（sprint7 的 0.00 → 2.97）。
+    #: 怀疑 0.28 把"爆发起步"也堵了：静止冲 6.0 必须先下蹲蓄力，机身会瞬时掉破 0.28
+    #: 被判死。账面支持这个解释 —— cmd 6.0 站着每秒付 1.8（6.0 × 0.3）、跑到 5.0 只付
+    #: 0.3，1.5/s 的梯度明明指向跑却不跑，说明挡着的不是奖励而是终止。
+    #: ⚠️ 0.25 这个值试过了，**是负结果**（sprint9b，2026-10-26 单变量 A/B，同种子同迭代）：
+    #:   * `low_height` 占终止 33.4% → 0.33%，但 `bad_orientation` 0.81% → 35.2%
+    #:     —— 终止原因只是换了个窗口，失败总量 34.2% → 35.5% 反而略升；
+    #:   * **冷启动阈值两版都是 5.0，一步没动**；6.0 两版都站着。
+    #: 根因是 `lin_vel_deficit` 单调奖励速度、永不饱和，必然把策略顶到任何现存约束边界上
+    #: ——放宽一个就顶到下一个。所以**别再靠放宽终止来解锁速度**，详见 TRAINING.md §9。
+    #: 回到 0.28，并且 released 的 sprint9 teacher 就是用 0.28 训的，蒸馏必须同源。
+    #: sprint9b 用的 0.25 存档在 logs/rsl_rl/bpx_pro_sprint9b/*/params/env.yaml 里。
     MIN_HEIGHT = 0.28
 
     def __post_init__(self):
@@ -774,6 +792,148 @@ class BpxProFlatSprint9EnvCfg_PLAY(BpxProFlatSprint9EnvCfg):
     终止项故意保留（和 base_contact 一个道理）：play 里真触发了就是个发现。
     冷启动测试直接用 ``play.py --vx 6.0``（--ramp 默认 0 = 阶跃指令）。
     """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 50
+        self.episode_length_s = 40.0
+        self.observations.policy.enable_corruption = False
+        self.events.push_robot = None
+        self.events.base_com = None
+        self.commands.base_velocity.ranges.lin_vel_x = (3.0, 3.0)
+        self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+        self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+
+
+@configclass
+class BpxProFlatSprint10EnvCfg(BpxProFlatSprint9EnvCfg):
+    """Sprint 第十版：**四向都要又快又稳**。继承 sprint9（冷启动阈值 5.0）。
+
+    这一版的出发点是用户指出的一件事：**指令范围从一开始就不对**，而不是某个奖励项
+    没调好。证据是"后退能力 2.1 m/s"这个数本身就是循环论证 —— 训练只给到 −2.0，
+    拿 −3.0 去测量到的是"训练边界 + 外推"，而且那时候力矩踩限幅 **0.0%**，根本没使劲。
+    横移同理：训 ±0.8、OOD 量到 2.0，真上限没人测过。拿这种数去"按能力对齐范围"，
+    等于把训练不足固化成设计约束。
+
+    ### 范围（本版的主改动）
+
+    | 轴 | sprint9 | sprint10 | 理由 |
+    |---|---|---|---|
+    | lin_vel_x | −2.0 / +6.5 | **±5.0 对称** | 后退 2.5 倍扩张；前进 6.5→5.0 是**减**，实测天花板 5.4，6.5 制造 1.1 的不可达死区 |
+    | lin_vel_y | ±0.8 | **±2.0** | 实测 2.0 下跟踪 0.213、对角同步 +0.82/+0.80 仍可用 |
+    | ang_vel_z | ±2.0 | **±3.0** | 实测 3.0 下角速度误差 0.145、抬脚 5.1 cm；4.0 才塌（误差 0.755、蹲到 0.316） |
+
+    ### 配套的四条机制改动（不改这些，新范围会被现有机制掐死）
+
+    1. ``lin_vel_deficit`` 扩到 **xy 平面**：原公式只读 ``cmd[:, 0]``，**纯横移时恒为 0**。
+       横移扩到 ±2.0 却没有反站桩梯度的话，会重演慢横移 0.2 那个"占空比 97%、
+       步频 0.25 Hz、跟踪误差 60%"的退化。
+    2. ``lin_vel_deficit`` 加上限 **3.0**：sprint9 在指令 6.0 驻留 **2.98 秒就摔**
+       （倾斜 5.0→4.04°、5.5→6.09°、6.0 翻），根因是这一项单调奖励速度、永不饱和，
+       必然把策略顶到任何现存约束边界。⚠️ 上限**不能用 1.5** —— 指令 5.0 时指向"跑"
+       的梯度会从 1.29/s 削到 0.24/s（弱 5.4 倍），很可能把冷启动重新搞坏；3.0 时
+       还剩 0.69/s。
+    3. 新增 ``ang_vel_deficit``：``track_ang_vel_z_exp`` 和线速度项同一个 exp 核、
+       同一个 std=0.5，有**同样的饱和死区**。转向扩到 ±3.0 之前必须先加，
+       否则是在转向方向复制一遍站桩。
+    4. ``flat_roll`` 按 ``|cmd_vy|`` 门控：**横移需要侧倾去迎**，实测横移 2.0 时横滚
+       4.13° 正是被 −2.0 的 grav_y² 压着，而髋 roll 力矩 P99 只有 11.7–18.0（上限 33），
+       不是关节力不够。这是横移速度的**真正杠杆**。
+
+    ``use_planar`` 门控（能量三项 + 抬脚）一并打开，但它主要帮的是**斜向组合指令**
+    （如 vx 4.0 + vy 1.5 → ‖cmd‖ 4.27 比单看 vx 更松）。纯横移/纯转向实测力矩踩限幅
+    都是 0.0%，能量**不是**那两个方向的瓶颈，所以别指望这一条带来横移提速。
+
+    ### 明确**不做**的事
+
+    **抬脚公式一个字不改。** 后退（4.6 cm）/ 旋转（4.5 cm）贴地的机制我一度归因于
+    ``tanh(2‖v_foot‖)`` 门控在慢步态下豁免，**算过之后证伪**：后退摆动足世界速度
+    ~3 m/s → 门控 0.9999，旋转 ~1.5 m/s → 0.995，惩罚是全额施加的。门控要到足端
+    速度 <0.5 m/s 才明显衰减（只有慢横移 0.2 那种情形成立）。真实原因未知，最可能是
+    那两个方向采样密度太低。本版靠扩范围把采样提上去，然后**实测**，不猜。
+    （另：曾设想改看"足端相对机身速度"——那是错的，支撑足相对机身的速度恰好等于机身
+    速度，改完会反过来惩罚支撑足。）
+
+    ### 四向验收标准（以前只有前进指标，这是本版新立的）
+
+    | 方向 | 标准 |
+    |---|---|
+    | 前进 | ``--preset dwell`` 在 5.0 驻留 25 s 不摔、倾斜 <3°；冷启动阈值保持 ≥5.0 |
+    | 后退 | 实速 ≥2.5、抬脚 ≥6 cm |
+    | 横移 | 1.5 时抬脚 ≥6 cm、横滚 <2°；0.2 时步频 >1 Hz（不退化成站桩） |
+    | 转向 | 2.0 时抬脚 ≥6 cm；3.0 时角速度误差 <0.2 |
+    """
+
+    #: 速度亏空上限。3.0 保住破站桩的梯度（0.69/s），同时切掉"无限顶边界"。别用 1.5。
+    VEL_DEFICIT_CAP = 3.0
+    #: 转向亏空的权重和上限。相对角跟踪奖励(+0.75)约 53%，和线速度那边的比例对齐。
+    ANG_DEFICIT_WEIGHT = -0.2
+    ANG_DEFICIT_CAP = 2.0
+    #: 横滚门控：|cmd_vy| ≤0.5 全额（保住直线横滚），≥2.0 降到 25%（放开横移侧倾）。
+    ROLL_GATE = {"vy_lo": 0.5, "vy_hi": 2.0, "gate_min": 0.25}
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # ① 范围：前后对称 ±5.0，横移 ±2.0，转向 ±3.0
+        self.commands.base_velocity.ranges.lin_vel_x = (-5.0, 5.0)
+        self.commands.base_velocity.ranges.lin_vel_y = (-2.0, 2.0)
+        self.commands.base_velocity.ranges.ang_vel_z = (-3.0, 3.0)
+
+        # ② 速度亏空：扩到 xy 平面 + 加上限
+        self.rewards.lin_vel_deficit.params.update(
+            {"use_xy": True, "max_deficit": self.VEL_DEFICIT_CAP}
+        )
+
+        # ③ 转向亏空（新）
+        self.rewards.ang_vel_deficit = RewTerm(
+            func=mdp.ang_vel_deficit,
+            weight=self.ANG_DEFICIT_WEIGHT,
+            params={"command_name": "base_velocity", "max_deficit": self.ANG_DEFICIT_CAP},
+        )
+
+        # ④ 横滚按横移指令门控（横移提速的真正杠杆）
+        self.rewards.flat_roll = RewTerm(
+            func=mdp.flat_orientation_roll_l2_gated,
+            weight=self.rewards.flat_roll.weight,
+            params={"command_name": "base_velocity", **self.ROLL_GATE},
+        )
+
+        # ⑤ 能量门控和抬脚门控改用平面指令模长（主要利好斜向组合指令）
+        for term in (self.rewards.dof_torques_l2, self.rewards.dof_acc_l2,
+                     self.rewards.action_rate_l2, self.rewards.foot_clearance):
+            term.params["use_planar"] = True
+
+
+@configclass
+class BpxProFlatSprint10BackEnvCfg(BpxProFlatSprint10EnvCfg):
+    """**只走后退的判别实验**（不是产品版本，不要拿去蒸馏上板）。
+
+    目的：把"几何/动力学上做不到"和"多任务训练里后退性价比不够"分开。四个候选解释
+    已排除三个 —— 不是力矩（后退 −3.0 时膝 P99 21 N·m、踩限幅 **0.0%**，而前进 5.0 时
+    14.1% 顶限幅）、不是抬脚门控（后退摆动足世界速度 ~3 m/s → tanh 门控 0.9999，惩罚
+    全额施加）、不是采样密度（sprint10 把后退范围扩了 2.5 倍，实速只 +9%、抬脚没动）、
+    也不是关节几何（动作权限 ±0.75 rad 对前后完全对称，且远窄于 URDF 限位）。
+
+    只剩最后一个：多任务里后退拿不到足够的梯度份额。这个 cfg 把指令锁死在后退，
+    让 100% 的采样都投进去，若还是 2.3 m/s / 4.5 cm，那就是物理到头了。
+
+    判据（从 sprint10 的 teacher 续 400 迭代后 play 复测）：
+      * 实速 >3.0 且抬脚 >8 cm  → 能做到，是多任务权衡问题，该给后退单独塑形/配额
+      * 仍是 ~2.3 / ~4.5 cm     → 物理到头，后退上限接受现实，别再投入
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.commands.base_velocity.ranges.lin_vel_x = (-5.0, -1.0)
+        self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+        self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+        self.commands.base_velocity.rel_standing_envs = 0.0   # 全部用来走后退
+
+
+@configclass
+class BpxProFlatSprint10EnvCfg_PLAY(BpxProFlatSprint10EnvCfg):
+    """Sprint10 的回放 / 导出配置。终止项保留：play 里真触发了就是个发现。"""
 
     def __post_init__(self):
         super().__post_init__()

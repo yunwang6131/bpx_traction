@@ -25,14 +25,23 @@ if TYPE_CHECKING:
 # 速度门控的能量惩罚：低速全额（省能平稳），高速放松（让策略敢发力冲）
 # ---------------------------------------------------------------------------
 def _speed_gate(
-    env: ManagerBasedRLEnv, command_name: str, v_lo: float, v_hi: float, gate_min: float
+    env: ManagerBasedRLEnv, command_name: str, v_lo: float, v_hi: float, gate_min: float,
+    use_planar: bool = False,
 ) -> torch.Tensor:
-    """(N,) 门控系数：|cmd_vx| ≤ v_lo → 1；≥ v_hi → gate_min；之间线性。
+    """(N,) 门控系数：指令速度 ≤ v_lo → 1；≥ v_hi → gate_min；之间线性。
 
     用**指令速度**而非实测速度（实测有噪声、且站桩时实测=0 会误判成低速反而重罚，
     把站桩锁死）。指令是策略当前被要求的速度，高指令时就该放松，鼓励它去冲。
+
+    ``use_planar``（sprint10 新增，默认 False 保持 sprint7/9 行为逐位不变）：
+
+    * False —— 只看 ``|cmd_vx|``。**后果是横移和转向永远拿不到高速放松**：横移指令
+      给到 2.0、转向给到 3.0，力矩/加速度/动作率惩罚全额不减，而前进 4.5 时这些
+      降到 10–20%。这是 sprint9 及之前横移/转向上不去的结构性原因之一。
+    * True —— 用平面指令模长 ``‖cmd_xy‖``，横移和前进同等对待。
     """
-    v = env.command_manager.get_command(command_name)[:, 0].abs()
+    cmd = env.command_manager.get_command(command_name)
+    v = torch.norm(cmd[:, :2], dim=1) if use_planar else cmd[:, 0].abs()
     frac = ((v - v_lo) / max(v_hi - v_lo, 1e-6)).clamp(0.0, 1.0)
     return 1.0 - (1.0 - gate_min) * frac
 
@@ -40,32 +49,33 @@ def _speed_gate(
 def joint_torques_l2_gated(
     env: ManagerBasedRLEnv, command_name: str = "base_velocity",
     v_lo: float = 2.0, v_hi: float = 4.5, gate_min: float = 0.1,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"), use_planar: bool = False,
 ) -> torch.Tensor:
     """Σ τ²，乘速度门控。高速时放松，让策略敢用大力矩推进。"""
     asset: Articulation = env.scene[asset_cfg.name]
     base = torch.sum(torch.square(asset.data.applied_torque), dim=1)
-    return base * _speed_gate(env, command_name, v_lo, v_hi, gate_min)
+    return base * _speed_gate(env, command_name, v_lo, v_hi, gate_min, use_planar)
 
 
 def joint_acc_l2_gated(
     env: ManagerBasedRLEnv, command_name: str = "base_velocity",
     v_lo: float = 2.0, v_hi: float = 4.5, gate_min: float = 0.1,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"), use_planar: bool = False,
 ) -> torch.Tensor:
     """Σ q̈²，乘速度门控。高速时放松，让策略敢爆发式蹬腿。"""
     asset: Articulation = env.scene[asset_cfg.name]
     base = torch.sum(torch.square(asset.data.joint_acc), dim=1)
-    return base * _speed_gate(env, command_name, v_lo, v_hi, gate_min)
+    return base * _speed_gate(env, command_name, v_lo, v_hi, gate_min, use_planar)
 
 
 def action_rate_l2_gated(
     env: ManagerBasedRLEnv, command_name: str = "base_velocity",
     v_lo: float = 2.0, v_hi: float = 4.5, gate_min: float = 0.2,
+    use_planar: bool = False,
 ) -> torch.Tensor:
     """Σ(a_t − a_{t−1})²，乘速度门控。高速时放松，让动作可以变快。"""
     base = torch.sum(torch.square(env.action_manager.action - env.action_manager.prev_action), dim=1)
-    return base * _speed_gate(env, command_name, v_lo, v_hi, gate_min)
+    return base * _speed_gate(env, command_name, v_lo, v_hi, gate_min, use_planar)
 
 
 def foot_clearance_penalty(
@@ -127,6 +137,7 @@ def foot_clearance_deficit(
 def foot_clearance_deficit_gated(
     env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, target_height: float, tanh_mult: float,
     command_name: str = "base_velocity", v_lo: float = 2.0, v_hi: float = 4.5, gate_min: float = 0.3,
+    use_planar: bool = False,
 ) -> torch.Tensor:
     """抬脚亏空惩罚 × 速度门控。高速时放松抬脚要求。
 
@@ -140,12 +151,13 @@ def foot_clearance_deficit_gated(
     打架。低速（≤v_lo）仍是全额，sprint4 挣到的 7 cm 不丢。
     """
     base = foot_clearance_deficit(env, asset_cfg, target_height, tanh_mult)
-    return base * _speed_gate(env, command_name, v_lo, v_hi, gate_min)
+    return base * _speed_gate(env, command_name, v_lo, v_hi, gate_min, use_planar)
 
 
 def lin_vel_deficit(
     env: ManagerBasedRLEnv, command_name: str = "base_velocity",
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    use_xy: bool = False, max_deficit: float | None = None,
 ) -> torch.Tensor:
     """单边线性速度亏空：实测速度在指令方向上的分量低于 |cmd_vx| 的差值（权重取负）。
 
@@ -167,9 +179,63 @@ def lin_vel_deficit(
     分），只在"该快却慢"时才咬。超速不奖励（clamp 到 0）；零指令不受影响
     （sign(0)=0 → 恒为 0，站立环境不被这一项推着动）。
     """
-    cmd = env.command_manager.get_command(command_name)[:, 0]
-    vx = env.scene[asset_cfg.name].data.root_lin_vel_b[:, 0]
-    return (cmd.abs() - vx * torch.sign(cmd)).clamp(min=0.0)
+    cmd = env.command_manager.get_command(command_name)
+    vel = env.scene[asset_cfg.name].data.root_lin_vel_b
+    if use_xy:
+        # 平面版：沿**指令方向**的速度分量和指令模长的差。
+        # cmd=0 时 unit=0 -> 亏空恒为 0，站立环境不受这一项推动（和纯 vx 版一致）。
+        speed = torch.norm(cmd[:, :2], dim=1)
+        unit = cmd[:, :2] / speed.clamp(min=1e-6).unsqueeze(-1)
+        along = (vel[:, :2] * unit).sum(dim=1)
+        deficit = (speed - along).clamp(min=0.0)
+    else:
+        deficit = (cmd[:, 0].abs() - vel[:, 0] * torch.sign(cmd[:, 0])).clamp(min=0.0)
+    if max_deficit is not None:
+        deficit = deficit.clamp(max=max_deficit)
+    return deficit
+
+
+def ang_vel_deficit(
+    env: ManagerBasedRLEnv, command_name: str = "base_velocity",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    max_deficit: float | None = None,
+) -> torch.Tensor:
+    """转向版的单边线性亏空（权重取负）。sprint10 新增。
+
+    `track_ang_vel_z_exp` 和线速度那项是同一个 exp 核、同一个 std=0.5，所以有**同样的
+    饱和死区**：转向误差超过 ~1.5 rad/s 后 `exp(−err²/0.25)` 趴到 0，指令 3.0 时
+    "不转"和"转 1.5"几乎同分，没有梯度爬出来。前进方向这个病已经由
+    :func:`lin_vel_deficit` 治好（冷启动阈值 4.0 → 5.0），转向还没有对应的药。
+
+    把指令上限扩到 ±3.0 之前必须先加这一项，否则是在转向方向复制一遍站桩。
+    """
+    cmd = env.command_manager.get_command(command_name)[:, 2]
+    wz = env.scene[asset_cfg.name].data.root_ang_vel_b[:, 2]
+    deficit = (cmd.abs() - wz * torch.sign(cmd)).clamp(min=0.0)
+    if max_deficit is not None:
+        deficit = deficit.clamp(max=max_deficit)
+    return deficit
+
+
+def flat_orientation_roll_l2_gated(
+    env: ManagerBasedRLEnv, command_name: str = "base_velocity",
+    vy_lo: float = 0.5, vy_hi: float = 2.0, gate_min: float = 0.25,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """横滚惩罚 × **横移指令**门控（权重取负）。sprint10 新增。
+
+    `flat_orientation_roll_l2`（−2.0 罚 grav_y²）是 sprint4 为了压"随机对称破缺长出的
+    ~2° 横滚"加的，当时只考虑直线前进。但**横移本来就需要侧倾去迎**——实测横移 2.0
+    时横滚 4.13°，正是被这一项压着，而髋 roll 力矩 P99 只有 11.7–18.0（上限 33），
+    说明不是关节力不够。
+
+    低横移指令（≤vy_lo）仍是全额，sprint4 挣到的直线横滚不丢。
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    base = torch.square(asset.data.projected_gravity_b[:, 1])
+    vy = env.command_manager.get_command(command_name)[:, 1].abs()
+    frac = ((vy - vy_lo) / max(vy_hi - vy_lo, 1e-6)).clamp(0.0, 1.0)
+    return base * (1.0 - (1.0 - gate_min) * frac)
 
 
 def feet_gait(
